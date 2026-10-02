@@ -1,0 +1,14 @@
+{
+  "name": "clawd-dance",
+  "description": "Clawd（Claude Code のマスコットの二次創作）が作業に合わせて踊る、Claude Code デスクトップ用の mod",
+  "owner": {
+    "name": "たぬ"
+  },
+  "plugins": [
+    {
+      "name": "clawd-dance",
+      "source": "./plugins/clawd-dance",
+      "description": "入力欄の上の帯で、作業に合わせて Clawd（二次創作版）が踊り、コンテキストと利用枠の使用量も表示する"
+    }
+  ]
+}

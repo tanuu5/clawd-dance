@@ -1,0 +1,58 @@
+{
+  "name": "clawd-dance",
+  "version": "0.11.0",
+  "description": "入力欄の上の帯で、作業に合わせて Clawd（二次創作版）が踊り、使用量も表示する",
+  "author": {
+    "name": "たぬ"
+  },
+  "userConfig": {
+    "sound": {
+      "type": "string",
+      "title": "終わったときの音",
+      "description": "長いターンが終わったときに鳴らすもの。効果音（ピロローン）のあとに「終わったよ」と読み上げる",
+      "options": [
+        "効果音と声",
+        "効果音だけ",
+        "声だけ",
+        "鳴らさない"
+      ],
+      "default": "効果音と声"
+    },
+    "sound_min_seconds": {
+      "type": "number",
+      "title": "音を鳴らすターンの長さ（秒）",
+      "description": "この秒数以上かかったターンが終わったときだけ音を鳴らす",
+      "default": 15,
+      "min": 0,
+      "max": 3600
+    },
+    "voice": {
+      "type": "string",
+      "title": "読み上げの声",
+      "description": "macOS の声の名前（Kyoko、Eddy、Flo など）。入っていない声なら既定の声で読む",
+      "default": "Kyoko"
+    },
+    "show_when_idle": {
+      "type": "boolean",
+      "title": "待機中も帯を出す",
+      "description": "オフにすると、Claude が作業している間だけ帯を出す",
+      "default": true
+    },
+    "banzai_seconds": {
+      "type": "number",
+      "title": "バンザイの長さ（秒）",
+      "description": "ターンが終わった直後にバンザイしている時間",
+      "default": 4,
+      "min": 0,
+      "max": 60
+    },
+    "sleep_after_minutes": {
+      "type": "number",
+      "title": "眠るまでの時間（分）",
+      "description": "ターンが終わってから、この時間がたつと Clawd が眠る",
+      "default": 3,
+      "min": 1,
+      "max": 240
+    }
+  }
+}
