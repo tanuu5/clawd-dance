@@ -50,7 +50,7 @@ Claude が考えているあいだ、ただ待つのは少しさみしい。そ�
 
 ## インストール
 
-**動作環境**：Claude Code のデスクトップアプリ（Code タブ）。mod の仕組み（function hooks）が入った版が必要です。作者は macOS 版のデスクトップアプリ（Claude Code 2.1.286）で確かめました。ターミナルの `claude` や VS Code 拡張では帯に何も出ません。
+**動作環境**：Claude Code のデスクトップアプリ（Code タブ）。mod の仕組み（function hooks）が入った版が必要です。作者は macOS 版のデスクトップアプリ 2.19675.0（中に入っている Claude Code は 2.1.286）で確かめました。ターミナルの `claude` や VS Code 拡張では帯に何も出ません。
 
 ターミナルで次の 2 行を実行します。
 
