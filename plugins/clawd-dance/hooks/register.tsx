@@ -237,6 +237,7 @@ const VARIANTS = [
   ...(['banzai', 'idle', 'sleep'] as const).map(pose => ({ pose, sweat: 0 })),
 ].map(({ pose, sweat }) => ({ id: `${pose}-${sweat}`, pose, sweat, source: clawdSvg(pose, sweat) }))
 
+const RATE_LIMIT_ORDER = ['five_hour', 'seven_day', 'spend_limit']
 const RATE_LIMIT_LABELS: Record<string, string> = {
   five_hour: '5時間枠',
   seven_day: '7日枠',
@@ -246,6 +247,56 @@ const RATE_LIMIT_LABELS: Record<string, string> = {
 function bar(percent: number): string {
   const filled = Math.max(0, Math.min(10, Math.round(percent / 10)))
   return '▰'.repeat(filled) + '▱'.repeat(10 - filled)
+}
+
+// 目安の位置に縦線を差し込んだバー（例：67% で目安 61% → ▰▰▰▰▰▰┃▰▱▱▱）
+function barWithTarget(percent: number, target: number): string {
+  const cells = [...bar(percent)]
+  cells.splice(Math.max(0, Math.min(10, Math.round(target / 10))), 0, '┃')
+  return cells.join('')
+}
+
+// ---- 7日枠の目安（usage-log mod が書く pace.json） ----
+// usage-log は 5時間枠・7日枠の値と、今週の目安の時点（時刻・累計 %・ラベル）を ~/.claude/usage-log/pace.json に書く。
+// あれば 7日枠の行に目安を足し、最初の応答の前（このセッションがまだ値を持たない間）は枠の値もそこから出す。
+// 無ければ何もしない（usage-log は無くても動く）。
+
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000
+const PACE_FILE = '.claude/usage-log/pace.json'
+
+type PaceReading = { pct: number; resetsAt: string }
+type PaceFile = {
+  sevenDay: PaceReading
+  fiveHour: PaceReading | null
+  windowEnd: number
+  checkpoints: { at: number; pct: number; label: string }[]
+}
+
+async function readPace($: EngineInterface, state: BandState) {
+  try {
+    const home = await $.env.get('HOME')
+    if (home === undefined) return
+    const pace = JSON.parse(await $.fs.read(`${home}/${PACE_FILE}`)) as PaceFile
+    if (typeof pace.sevenDay?.pct === 'number' && Array.isArray(pace.checkpoints)) state.pace = pace
+  } catch {
+    // 無い、書きかけで読めない：前の値のまま
+  }
+}
+
+// 次の時点の目安と、そこまであと何 %（負なら超過）。枠が pace.json より後の週なら、時点を週単位でずらす
+function paceFor(pace: PaceFile | undefined, resetsAt: string | undefined, percent: number, now: number) {
+  if (pace === undefined || resetsAt === undefined) return undefined
+  const end = Date.parse(resetsAt)
+  const shift = Math.round((end - pace.windowEnd) / WEEK_MS) * WEEK_MS
+  if (!Number.isFinite(end) || Math.abs(end - (pace.windowEnd + shift)) > 60 * 60_000) return undefined
+  const next = pace.checkpoints.find(c => c.at + shift > now)
+  if (next === undefined) return undefined
+  const margin = next.pct - percent
+  return {
+    target: next.pct,
+    isOver: margin < 0,
+    text: `目安${next.pct}%（${next.label}）${margin < 0 ? `超過${Math.round(-margin * 10) / 10}` : `あと${Math.round(margin * 10) / 10}`}`,
+  }
 }
 
 function tokens(n: number): string {
@@ -276,6 +327,8 @@ type BandState = {
   lastDoneAt: number
   runningTools: Map<string, string>
   drawnSignature: string
+  pace: PaceFile | undefined
+  isPaceLoaded: boolean
 }
 
 // 帯に出すもの（ポーズ・汗・数字）を今の状態から決める。描画とイベントの両方が使う。
@@ -303,12 +356,31 @@ async function computeView($: EngineInterface, state: BandState, isWorking: bool
     context.percent === undefined
       ? 'コンテキスト  まだ計測なし'
       : `コンテキスト  ${bar(context.percent)}  ${context.percent}%  ${tokens(context.tokens ?? 0)} / ${tokens(context.window)}`
-  const rateLines = rateLimits.map(limit => ({
-    kind: limit.kind,
-    percent: limit.percentUsed,
-    text: `${RATE_LIMIT_LABELS[limit.kind] ?? limit.kind}  ${bar(limit.percentUsed)}  ${limit.percentUsed}%  ${untilReset(limit.resetsAt, now)}`,
-  }))
-  const signature = [pose, sweat, contextLine, ...rateLines.map(line => line.text)].join('|')
+  if (!state.isPaceLoaded) {
+    state.isPaceLoaded = true
+    await readPace($, state)
+  }
+  const limits = rateLimits.map(limit => ({ kind: limit.kind, percent: limit.percentUsed, resetsAt: limit.resetsAt }))
+  // 最初の応答の前は、このセッションに枠の値がない。usage-log が書いた値で補う
+  const pace = state.pace
+  if (pace !== undefined) {
+    const fallbacks: [string, PaceReading | null][] = [['five_hour', pace.fiveHour], ['seven_day', pace.sevenDay]]
+    for (const [kind, reading] of fallbacks) {
+      if (reading && !limits.some(l => l.kind === kind) && Date.parse(reading.resetsAt) > now) {
+        limits.push({ kind, percent: reading.pct, resetsAt: reading.resetsAt })
+      }
+    }
+    limits.sort((a, b) => RATE_LIMIT_ORDER.indexOf(a.kind) - RATE_LIMIT_ORDER.indexOf(b.kind))
+  }
+  const rateLines = limits.map(limit => {
+    const label = RATE_LIMIT_LABELS[limit.kind] ?? limit.kind
+    const target = limit.kind === 'seven_day' ? paceFor(pace, limit.resetsAt, limit.percent, now) : undefined
+    const until = untilReset(limit.resetsAt, now)
+    return target === undefined
+      ? { kind: limit.kind, percent: limit.percent, text: `${label}  ${bar(limit.percent)}  ${limit.percent}%  ${until}`, pace: undefined, until }
+      : { kind: limit.kind, percent: limit.percent, text: `${label}  ${barWithTarget(limit.percent, target.target)}  ${limit.percent}%`, pace: target, until }
+  })
+  const signature = [pose, sweat, contextLine, ...rateLines.map(line => `${line.text}${line.pace?.text ?? ''}${line.until}`)].join('|')
 
   return { now, pose, sweat, contextPercent, contextLine, rateLines, signature }
 }
@@ -334,6 +406,8 @@ export const register: Register = (on, options) => {
     lastDoneAt: 0,
     runningTools: new Map(),
     drawnSignature: '',
+    pace: undefined,
+    isPaceLoaded: false,
   }
   let timers: { cancel: () => void }[] = []
   let shownPose: Pose | null = null
@@ -344,6 +418,12 @@ export const register: Register = (on, options) => {
     timers.forEach(t => t.cancel())
     timers = []
   }
+
+  // usage-log の pace.json を 1 分ごとに読み直す（目安が 0:00 で変わる、別のセッションが値を進める）
+  on('session.start', async ($, e, next) => {
+    $.clock.every(60_000, () => void readPace($, state).then(() => redrawIfChanged($, state)))
+    return next(e)
+  })
 
   on('turn.start', async ($, e, next) => {
     // サブエージェントのターンでも呼ばれうるので、本体のターンの始まりだけを数える
@@ -382,6 +462,8 @@ export const register: Register = (on, options) => {
     state.banzaiUntil = e.reason === 'answer' ? state.lastDoneAt + settings.banzaiMs : 0
     resetTimers()
     timers = [settings.banzaiMs, settings.sleepAfterMs].map(ms => $.clock.after(ms + 50, () => void redrawIfChanged($, state)))
+    // usage-log がターンの終わりに pace.json を書き直すので、少し待って読む
+    timers.push($.clock.after(3_000, () => void readPace($, state).then(() => redrawIfChanged($, state))))
     await redrawIfChanged($, state)
 
     const seconds = Math.round(e.durationMs / 1000)
@@ -436,11 +518,21 @@ export const register: Register = (on, options) => {
           <Text dimColor={contextPercent < 80} color={contextPercent >= 80 ? 'red' : undefined}>
             {contextLine}
           </Text>
-          {rateLines.map(line => (
-            <Text key={line.kind} dimColor={line.percent < 80} color={line.percent >= 80 ? 'red' : undefined}>
-              {line.text}
-            </Text>
-          ))}
+          {rateLines.map(line =>
+            line.pace === undefined ? (
+              <Text key={line.kind} dimColor={line.percent < 80} color={line.percent >= 80 ? 'red' : undefined}>
+                {line.text}
+              </Text>
+            ) : (
+              <Box key={line.kind} flexDirection="row" gap={2}>
+                <Text dimColor={line.percent < 80} color={line.percent >= 80 ? 'red' : undefined}>
+                  {line.text}
+                </Text>
+                <Text color={line.pace.isOver ? 'red' : 'green'}>{line.pace.text}</Text>
+                <Text dimColor>{line.until}</Text>
+              </Box>
+            ),
+          )}
         </Box>
       </Box>
     )
