@@ -1,4 +1,5 @@
-import type { EngineInterface, PluginOptions, Register } from 'claude-code'
+import { chimeWavBase64, sleepyChimeWavBase64 } from './sounds'
+import type { AudioClip, EngineInterface, PluginOptions, Register } from 'claude-code'
 
 // Clawd（Anthropic のマスコットの二次創作版 SVG）を、状況に応じたポーズで帯に出す。
 // 脚は新しい Clawd に合わせ、外側の脚の外端を体の側面に揃えている。
@@ -17,6 +18,8 @@ const MIN_POSE_MS = 1_500
 // 使う人が /config で変えられる設定（plugin.json の userConfig）。値は register の options で届く。
 const SOUND_MODES = ['効果音と声', '効果音だけ', '声だけ', '鳴らさない'] as const
 type SoundMode = (typeof SOUND_MODES)[number]
+const NIGHT_SOUND_MODES = ['眠そうな音とひとこと', 'いつもどおり', '鳴らさない'] as const
+type NightSoundMode = (typeof NIGHT_SOUND_MODES)[number]
 
 type Settings = {
   showWhenIdle: boolean
@@ -25,6 +28,9 @@ type Settings = {
   sound: SoundMode
   soundMinSeconds: number
   voice: string
+  nightNudge: boolean
+  nightNudgeMs: number
+  nightSound: NightSoundMode
 }
 
 function readSettings(options: PluginOptions): Settings {
@@ -37,52 +43,10 @@ function readSettings(options: PluginOptions): Settings {
     sound,
     soundMinSeconds: num('sound_min_seconds', 15),
     voice: typeof options.voice === 'string' && options.voice !== '' ? options.voice : 'Kyoko',
+    nightNudge: options.night_nudge !== false,
+    nightNudgeMs: num('night_nudge_minutes', 0) * 60_000,
+    nightSound: NIGHT_SOUND_MODES.find(mode => mode === options.night_sound) ?? '眠そうな音とひとこと',
   }
-}
-
-// 終わったときの「ピロローン」。音声ファイルを同梱せず、ここで波形を合成して WAV にする。
-// ミ・ソ・ドを短く鳴らし、最後のドを長く響かせる。
-function chimeWavBase64(): string {
-  const rate = 22_050
-  const notes: [frequency: number, startSeconds: number, decay: number][] = [
-    [1318.5, 0.0, 9],
-    [1568.0, 0.09, 9],
-    [2093.0, 0.18, 3],
-  ]
-  const samples = new Float32Array(Math.floor(rate * 1.3))
-  for (const [frequency, startSeconds, decay] of notes) {
-    const start = Math.floor(startSeconds * rate)
-    for (let i = start; i < samples.length; i++) {
-      const t = (i - start) / rate
-      const attack = Math.min(1, t / 0.004)
-      const tone = Math.sin(2 * Math.PI * frequency * t) + 0.25 * Math.sin(4 * Math.PI * frequency * t) * Math.exp(-t * 12)
-      samples[i] = (samples[i] ?? 0) + attack * Math.exp(-t * decay) * tone
-    }
-  }
-  const peak = samples.reduce((max, v) => Math.max(max, Math.abs(v)), 1e-6)
-
-  const bytes = new Uint8Array(44 + samples.length * 2)
-  const view = new DataView(bytes.buffer)
-  const ascii = (offset: number, text: string) => [...text].forEach((c, k) => view.setUint8(offset + k, c.charCodeAt(0)))
-  ascii(0, 'RIFF')
-  view.setUint32(4, 36 + samples.length * 2, true)
-  ascii(8, 'WAVEfmt ')
-  view.setUint32(16, 16, true)
-  view.setUint16(20, 1, true)
-  view.setUint16(22, 1, true)
-  view.setUint32(24, rate, true)
-  view.setUint32(28, rate * 2, true)
-  view.setUint16(32, 2, true)
-  view.setUint16(34, 16, true)
-  ascii(36, 'data')
-  view.setUint32(40, samples.length * 2, true)
-  samples.forEach((v, i) => view.setInt16(44 + i * 2, Math.round((v / peak) * 0.55 * 32767), true))
-
-  let binary = ''
-  for (let i = 0; i < bytes.length; i += 0x8000) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
-  }
-  return btoa(binary)
 }
 
 type Pose = 'dance' | 'wild' | 'look' | 'type' | 'banzai' | 'idle' | 'sleep'
@@ -299,6 +263,81 @@ function paceFor(pace: PaceFile | undefined, resetsAt: string | undefined, perce
   }
 }
 
+// ---- 夜ふかしの声かけ ----
+// 0〜4 時台にメッセージを送ると、帯の Clawd の横にやさしい一言を出す（既定は送るたび。間隔をあけることもできる）。
+// 前の声かけの時刻と言葉は $.store に置き、別のセッションとも共有する。
+// その時間帯は、ターンの終わりの音も「ピポポ…」と眠そうな音にして、「終わったよ」の代わりにその一言を読む。
+// 手元の時差はサンドボックスでは分からないので、`date +%z` で一度だけ聞く。
+
+const NIGHT_LINES: Record<number, string[]> = {
+  0: ['日付が変わったよ。きりのいいところで休もうね', '0時を回ったよ。今日はここまでにする？', 'もう新しい日だね。無理しないでね'],
+  1: ['1時だよ。そろそろ区切りをつけよう', '夜ふかし中だね。あと少しにしようね', '1時を過ぎたよ。目、疲れてない？'],
+  2: ['2時だよ。そろそろ寝よう…', 'もう2時。続きは明日のほうがはかどるかも', '2時だよ。眠い頭だと、バグも増えちゃうよ'],
+  3: ['3時だよ。さすがに寝よう…', 'もう3時。体がいちばん大事だよ', '3時だよ。続きは起きてからにしよう'],
+  4: ['もう朝が来ちゃう。少しでも眠ろう', '4時だよ。少しだけでも横になろう', '空が明るくなる前に、おやすみ'],
+}
+// 出した一言を見せておく時間（次に送ったときにも消える）
+const NUDGE_SHOW_MS = 10 * 60_000
+
+// その時刻に出す一言。前回と同じ言葉は避ける。0〜4 時台でなければ undefined
+export function nightLine(hour: number, previous: unknown, random: number): string | undefined {
+  const lines = NIGHT_LINES[hour]
+  if (lines === undefined) return undefined
+  const choices = lines.filter(line => line !== previous)
+  return choices[Math.floor(random * choices.length) % choices.length] ?? lines[0]
+}
+
+async function localHour($: EngineInterface, state: BandState, now: number): Promise<number | undefined> {
+  if (state.tzOffsetMin === undefined) {
+    const { stdout } = await $.process.run(['/bin/date', '+%z'])
+    const m = /^([+-])(\d\d)(\d\d)$/.exec(stdout.trim())
+    if (!m) return undefined
+    state.tzOffsetMin = (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3]))
+  }
+  return new Date(now + state.tzOffsetMin * 60_000).getUTCHours()
+}
+
+// メッセージが送られたとき：時間帯と間隔が合えば一言を決めて state.nudge に置く。出したら true
+async function maybeNudge($: EngineInterface, state: BandState): Promise<boolean> {
+  if (!state.settings.nightNudge) return false
+  const now = await $.clock.now()
+  const hour = await localHour($, state, now)
+  if (hour === undefined || NIGHT_LINES[hour] === undefined) return false
+  const lastAt = Number((await $.store.get('nightNudgeAt')) ?? 0)
+  if (now - lastAt < state.settings.nightNudgeMs) return false
+  const text = nightLine(hour, await $.store.get('nightNudgeText'), Math.random())
+  if (text === undefined) return false
+  await $.store.set('nightNudgeAt', now)
+  await $.store.set('nightNudgeText', text)
+  state.nudge = { text, until: now + NUDGE_SHOW_MS }
+  return true
+}
+
+// ターンの終わりの音。夜（0〜4 時台）は設定に応じて、眠そうな音と声かけの一言に替えるか、鳴らさない
+async function playEndSound($: EngineInterface, state: BandState, clips: { chime: AudioClip; sleepy: AudioClip }, durationMs: number) {
+  const { settings } = state
+  let clip = clips.chime
+  let text = durationMs >= 120_000 ? 'おまたせ、終わったよ' : '終わったよ'
+  if (settings.nightSound !== 'いつもどおり') {
+    const now = await $.clock.now()
+    const hour = await localHour($, state, now).catch(() => undefined)
+    if (hour !== undefined && NIGHT_LINES[hour] !== undefined) {
+      if (settings.nightSound === '鳴らさない') return
+      clip = clips.sleepy
+      const shown = state.nudge !== undefined && now < state.nudge.until ? state.nudge.text : undefined
+      text = shown ?? nightLine(hour, undefined, Math.random()) ?? text
+    }
+  }
+  const speak = () => $.audio.speak(text, { voice: settings.voice }).catch(() => $.audio.speak(text))
+  // 効果音で気づかせてから喋る
+  if (settings.sound === '声だけ') {
+    await speak()
+    return
+  }
+  await $.audio.play(clip)
+  if (settings.sound === '効果音と声') await speak()
+}
+
 function tokens(n: number): string {
   return n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : `${Math.round(n / 1000)}k`
 }
@@ -329,6 +368,8 @@ type BandState = {
   drawnSignature: string
   pace: PaceFile | undefined
   isPaceLoaded: boolean
+  nudge: { text: string; until: number } | undefined
+  tzOffsetMin: number | undefined
 }
 
 // 帯に出すもの（ポーズ・汗・数字）を今の状態から決める。描画とイベントの両方が使う。
@@ -380,9 +421,10 @@ async function computeView($: EngineInterface, state: BandState, isWorking: bool
       ? { kind: limit.kind, percent: limit.percent, text: `${label}  ${bar(limit.percent)}  ${limit.percent}%  ${until}`, pace: undefined, until }
       : { kind: limit.kind, percent: limit.percent, text: `${label}  ${barWithTarget(limit.percent, target.target)}  ${limit.percent}%`, pace: target, until }
   })
-  const signature = [pose, sweat, contextLine, ...rateLines.map(line => `${line.text}${line.pace?.text ?? ''}${line.until}`)].join('|')
+  const nudgeText = state.nudge !== undefined && now < state.nudge.until ? state.nudge.text : undefined
+  const signature = [pose, sweat, contextLine, ...rateLines.map(line => `${line.text}${line.pace?.text ?? ''}${line.until}`), nudgeText ?? ''].join('|')
 
-  return { now, pose, sweat, contextPercent, contextLine, rateLines, signature }
+  return { now, pose, sweat, contextPercent, contextLine, rateLines, nudgeText, signature }
 }
 
 // 帯の描き直しは、見た目が変わるときだけにする。描き直すたびに絵がわずかにちらつくため。
@@ -395,7 +437,10 @@ async function redrawIfChanged($: EngineInterface, state: BandState) {
 
 export const register: Register = (on, options) => {
   const settings = readSettings(options)
-  const chime = { base64: chimeWavBase64(), mime: 'audio/wav' }
+  const clips = {
+    chime: { base64: chimeWavBase64(), mime: 'audio/wav' },
+    sleepy: { base64: sleepyChimeWavBase64(), mime: 'audio/wav' },
+  }
 
   // 描画が読む状態。変えたら redrawIfChanged で、見た目が変わるときだけ帯を描き直す。
   const state: BandState = {
@@ -408,11 +453,14 @@ export const register: Register = (on, options) => {
     drawnSignature: '',
     pace: undefined,
     isPaceLoaded: false,
+    nudge: undefined,
+    tzOffsetMin: undefined,
   }
   let timers: { cancel: () => void }[] = []
   let shownPose: Pose | null = null
   let shownSince = 0
   let holdTimer: { cancel: () => void } | null = null
+  let nudgeTimer: { cancel: () => void } | null = null
 
   const resetTimers = () => {
     timers.forEach(t => t.cancel())
@@ -426,6 +474,18 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.start', async ($, e, next) => {
+    // 打ったメッセージで始まるターンなら、前の一言を消し、夜ふかしの時間帯なら新しい一言を出す
+    if (e.text.trim() !== '') {
+      state.nudge = undefined
+      try {
+        if (await maybeNudge($, state)) {
+          nudgeTimer?.cancel()
+          nudgeTimer = $.clock.after(NUDGE_SHOW_MS + 50, () => void redrawIfChanged($, state))
+        }
+      } catch {
+        // 声かけに失敗しても帯とターンは止めない
+      }
+    }
     // サブエージェントのターンでも呼ばれうるので、本体のターンの始まりだけを数える
     if (!state.isInTurn) {
       state.isInTurn = true
@@ -468,14 +528,8 @@ export const register: Register = (on, options) => {
 
     const seconds = Math.round(e.durationMs / 1000)
     if (settings.sound !== '鳴らさない' && e.reason === 'answer' && seconds >= settings.soundMinSeconds) {
-      const text = seconds >= 120 ? 'おまたせ、終わったよ' : '終わったよ'
-      const speak = () => $.audio.speak(text, { voice: settings.voice }).catch(() => $.audio.speak(text))
-      // 効果音で気づかせてから喋る。鳴り終わるのを待たない（フックの持ち時間を使わないため）
-      const played =
-        settings.sound === '声だけ'
-          ? speak()
-          : $.audio.play(chime).then(() => (settings.sound === '効果音と声' ? speak() : undefined))
-      played.catch(() => undefined)
+      // 鳴り終わるのを待たない（フックの持ち時間を使わないため）
+      playEndSound($, state, clips, e.durationMs).catch(() => undefined)
     }
 
     return result
@@ -489,7 +543,7 @@ export const register: Register = (on, options) => {
     const { Box, Svg, Text } = $.ui.resolve(e)
     const view = await computeView($, state, e.props.isWorking)
     state.drawnSignature = view.signature
-    const { now, sweat, contextPercent, contextLine, rateLines } = view
+    const { now, sweat, contextPercent, contextLine, rateLines, nudgeText } = view
     let pose = view.pose
 
     // 前のポーズになってから MIN_POSE_MS たっていなければ前のポーズのまま。残り時間で描き直しを予約する。
@@ -513,6 +567,9 @@ export const register: Register = (on, options) => {
               <Svg source={variant.source} alt={POSE_ALT[variant.pose]} width={68} height={52} isInteractive />
             </Box>
           ))}
+        </Box>
+        <Box key="nudge" flexGrow={1} marginLeft={2}>
+          {nudgeText === undefined ? null : <Text>💤 {nudgeText}</Text>}
         </Box>
         <Box flexDirection="column" alignItems="flex-end">
           <Text dimColor={contextPercent < 80} color={contextPercent >= 80 ? 'red' : undefined}>

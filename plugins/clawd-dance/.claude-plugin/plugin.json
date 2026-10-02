@@ -1,6 +1,6 @@
 {
   "name": "clawd-dance",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "入力欄の上の帯で、作業に合わせて Clawd（二次創作版）が踊り、使用量も表示する",
   "author": {
     "name": "たぬ"
@@ -53,6 +53,31 @@
       "default": 3,
       "min": 1,
       "max": 240
+    },
+    "night_nudge": {
+      "type": "boolean",
+      "title": "夜ふかしの声かけ",
+      "description": "0〜4時台にメッセージを送ると、Clawd が帯でやさしくひとこと声をかける",
+      "default": true
+    },
+    "night_nudge_minutes": {
+      "type": "number",
+      "title": "声かけの間隔（分）",
+      "description": "一度声をかけたら、この時間がたつまで次の声かけをしない（ほかのセッションとも共有）。0 なら送るたびに声をかける",
+      "default": 0,
+      "min": 0,
+      "max": 240
+    },
+    "night_sound": {
+      "type": "string",
+      "title": "夜の終わりの音",
+      "description": "0〜4時台のターンの終わりに鳴らすもの。「眠そうな音とひとこと」は、ピポポ…と小さく下がる音のあとに、声かけの一言を読み上げる",
+      "options": [
+        "眠そうな音とひとこと",
+        "いつもどおり",
+        "鳴らさない"
+      ],
+      "default": "眠そうな音とひとこと"
     }
   }
 }

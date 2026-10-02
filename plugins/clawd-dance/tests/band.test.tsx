@@ -1,6 +1,8 @@
 import type { On, SessionRateLimit } from 'claude-code'
 import { describe, expect, test } from 'claude-code/testing'
 
+import { nightLine } from '../hooks/register'
+
 const bandProps = (isWorking: boolean) => ({
   hasSurvey: false,
   isWorking,
@@ -97,5 +99,20 @@ describe('7日枠の目安（usage-log の pace.json）', () => {
     const ui = await $.ui.mount({ plugin: 'clawd-dance', surface: 'desktop', component: 'AbovePrompt', props: bandProps(false) })
     expect(await ui.findAll({ type: 'Text', text: /目安/ })).toHaveLength(0)
     await ui.unmount()
+  })
+})
+
+describe('夜ふかしの声かけ', () => {
+  test('0〜4 時台だけ、その時刻の一言を選ぶ', async () => {
+    expect(nightLine(2, undefined, 0)).toBe('2時だよ。そろそろ寝よう…')
+    expect(nightLine(4, undefined, 0.99)).toBe('空が明るくなる前に、おやすみ')
+    expect(nightLine(5, undefined, 0)).toBeUndefined()
+    expect(nightLine(23, undefined, 0)).toBeUndefined()
+  })
+
+  test('前回と同じ言葉は続けない', async () => {
+    for (const random of [0, 0.4, 0.99]) {
+      expect(nightLine(2, '2時だよ。そろそろ寝よう…', random)).not.toBe('2時だよ。そろそろ寝よう…')
+    }
   })
 })
