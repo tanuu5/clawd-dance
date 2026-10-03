@@ -1,7 +1,7 @@
 import type { On, SessionRateLimit } from 'claude-code'
 import { describe, expect, test } from 'claude-code/testing'
 
-import { nightLine } from '../hooks/register'
+import { nightLine, questionLine } from '../hooks/register'
 
 const bandProps = (isWorking: boolean) => ({
   hasSurvey: false,
@@ -34,7 +34,7 @@ describe('帯', () => {
     for (const isWorking of [true, false]) {
       const ui = await $.ui.mount({ plugin: 'clawd-dance', surface: 'desktop', component: 'AbovePrompt', props: bandProps(isWorking) })
       const svgs = await ui.findAll({ type: 'Svg' })
-      expect(svgs.length).toBe(15)
+      expect(svgs.length).toBe(16)
       expect(await ui.find({ type: 'Text', text: /コンテキスト/ })).toBeDefined()
       await ui.unmount()
     }
@@ -114,5 +114,32 @@ describe('夜ふかしの声かけ', () => {
     for (const random of [0, 0.4, 0.99]) {
       expect(nightLine(2, '2時だよ。そろそろ寝よう…', random)).not.toBe('2時だよ。そろそろ寝よう…')
     }
+  })
+})
+
+describe('質問のときの声かけ', () => {
+  test('前回と同じ言葉は続けない', async () => {
+    for (const random of [0, 0.4, 0.99]) {
+      expect(questionLine('ちょっと聞きたいことがあるよ', random)).not.toBe('ちょっと聞きたいことがあるよ')
+    }
+  })
+
+  test('質問のダイアログが出るとき、効果音のあとに読み上げる', async ($, on) => {
+    engine(on)
+    const heard: string[] = []
+    on('audio.play', () => {
+      heard.push('♪')
+      return { value: undefined }
+    })
+    on('audio.speak', (_$, e) => {
+      heard.push(e.text)
+      return { value: undefined }
+    })
+    on('process.run', () => ({ value: { stdout: '+0900\n', stderr: '', exitCode: 0 } }))
+    on('tool.call', () => ({ result: {} }) as never)
+    await $.tool.call({ tool: 'AskUserQuestion', questions: [] } as never)
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(heard[0]).toBe('♪')
+    expect(heard[1]).toMatch(/聞きたい|質問|選んで/)
   })
 })

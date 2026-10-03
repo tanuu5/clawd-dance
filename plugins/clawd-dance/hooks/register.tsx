@@ -31,6 +31,7 @@ type Settings = {
   nightNudge: boolean
   nightNudgeMs: number
   nightSound: NightSoundMode
+  questionSound: SoundMode
 }
 
 function readSettings(options: PluginOptions): Settings {
@@ -46,10 +47,11 @@ function readSettings(options: PluginOptions): Settings {
     nightNudge: options.night_nudge !== false,
     nightNudgeMs: num('night_nudge_minutes', 0) * 60_000,
     nightSound: NIGHT_SOUND_MODES.find(mode => mode === options.night_sound) ?? '眠そうな音とひとこと',
+    questionSound: SOUND_MODES.find(mode => mode === options.question_sound) ?? '効果音と声',
   }
 }
 
-type Pose = 'dance' | 'wild' | 'look' | 'type' | 'banzai' | 'idle' | 'sleep'
+type Pose = 'dance' | 'wild' | 'look' | 'type' | 'ask' | 'banzai' | 'idle' | 'sleep'
 
 function poseForTool(tool: string): Pose {
   if (tool === 'Bash') {
@@ -60,6 +62,9 @@ function poseForTool(tool: string): Pose {
   }
   if (['Edit', 'Write', 'NotebookEdit'].includes(tool)) {
     return 'type'
+  }
+  if (tool === 'AskUserQuestion') {
+    return 'ask'
   }
 
   return 'dance'
@@ -97,6 +102,11 @@ const POSE_CSS: Record<Pose, string> = {
     #armR { animation: typeR 0.44s ease-in-out infinite alternate; }
     @keyframes typeL { from { transform: rotate(-30deg); } to { transform: rotate(-42deg); } }
     @keyframes typeR { from { transform: rotate(42deg); } to { transform: rotate(30deg); } }`,
+  ask: `
+    #armL { animation: raise 1.2s ease-in-out infinite; }
+    .q { animation: bob 1.2s ease-in-out infinite; }
+    @keyframes raise { 0%, 100% { transform: rotate(48deg); } 50% { transform: rotate(62deg); } }
+    @keyframes bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }`,
   banzai: `
     #all { animation: hop 0.5s ease-in-out infinite; }
     #armL { transform: rotate(32deg); }
@@ -145,6 +155,7 @@ function clawdSvg(pose: Pose, sweat: number): string {
          <rect class="spark spark2" x="72" y="-16" width="6" height="6" fill="#E8C13C"/>
          <rect class="spark spark3" x="126" y="-8" width="6" height="6" fill="#E8C13C"/>`
       : ''
+  const question = pose === 'ask' ? `<text class="q" x="124" y="8" font-size="24" font-weight="bold" fill="#E8C13C">?</text>` : ''
   const zzz =
     pose === 'sleep'
       ? `<text class="z" x="122" y="10" font-size="14" fill="#8A96C9">z</text>
@@ -164,7 +175,7 @@ function clawdSvg(pose: Pose, sweat: number): string {
 
   return `<svg viewBox="-12 -18 174 134" xmlns="http://www.w3.org/2000/svg">
 <style>${COMMON_CSS}${POSE_CSS[pose]}</style>
-${notes}${sparks}${zzz}
+${notes}${sparks}${question}${zzz}
 <g id="all">
   <g id="armL"><rect x="12" y="${armY}" width="24" height="22" fill="${BODY}"/></g>
   <g id="armR"><rect x="114" y="${armY}" width="24" height="22" fill="${BODY}"/></g>
@@ -188,6 +199,7 @@ const POSE_ALT: Record<Pose, string> = {
   wild: '激しく踊る Clawd',
   look: 'きょろきょろする Clawd',
   type: 'タイピングする Clawd',
+  ask: '手を挙げて質問する Clawd',
   banzai: 'バンザイする Clawd',
   idle: '待っている Clawd',
   sleep: '眠る Clawd',
@@ -198,7 +210,7 @@ const POSE_ALT: Record<Pose, string> = {
 const WORKING_POSES: Pose[] = ['dance', 'wild', 'look', 'type']
 const VARIANTS = [
   ...WORKING_POSES.flatMap(pose => [0, 1, 2].map(sweat => ({ pose, sweat }))),
-  ...(['banzai', 'idle', 'sleep'] as const).map(pose => ({ pose, sweat: 0 })),
+  ...(['ask', 'banzai', 'idle', 'sleep'] as const).map(pose => ({ pose, sweat: 0 })),
 ].map(({ pose, sweat }) => ({ id: `${pose}-${sweat}`, pose, sweat, source: clawdSvg(pose, sweat) }))
 
 const RATE_LIMIT_ORDER = ['five_hour', 'seven_day', 'spend_limit']
@@ -313,29 +325,47 @@ async function maybeNudge($: EngineInterface, state: BandState): Promise<boolean
   return true
 }
 
-// ターンの終わりの音。夜（0〜4 時台）は設定に応じて、眠そうな音と声かけの一言に替えるか、鳴らさない
-async function playEndSound($: EngineInterface, state: BandState, clips: { chime: AudioClip; sleepy: AudioClip }, durationMs: number) {
+type Clips = { chime: AudioClip; sleepy: AudioClip }
+
+// 効果音で気づかせてから喋る。夜（0〜4 時台）は夜の音の設定に応じて、眠そうな音と夜の言葉に替えるか、鳴らさない
+async function playCue($: EngineInterface, state: BandState, clips: Clips, mode: SoundMode, text: string, nightText: (hour: number, now: number) => string | undefined) {
+  if (mode === '鳴らさない') return
   const { settings } = state
   let clip = clips.chime
-  let text = durationMs >= 120_000 ? 'おまたせ、終わったよ' : '終わったよ'
   if (settings.nightSound !== 'いつもどおり') {
     const now = await $.clock.now()
     const hour = await localHour($, state, now).catch(() => undefined)
     if (hour !== undefined && NIGHT_LINES[hour] !== undefined) {
       if (settings.nightSound === '鳴らさない') return
       clip = clips.sleepy
-      const shown = state.nudge !== undefined && now < state.nudge.until ? state.nudge.text : undefined
-      text = shown ?? nightLine(hour, undefined, Math.random()) ?? text
+      text = nightText(hour, now) ?? text
     }
   }
   const speak = () => $.audio.speak(text, { voice: settings.voice }).catch(() => $.audio.speak(text))
-  // 効果音で気づかせてから喋る
-  if (settings.sound === '声だけ') {
+  if (mode === '声だけ') {
     await speak()
     return
   }
   await $.audio.play(clip)
-  if (settings.sound === '効果音と声') await speak()
+  if (mode === '効果音と声') await speak()
+}
+
+// ターンの終わりの音。夜は「終わったよ」の代わりに、帯に出している声かけの一言を読む
+function playEndSound($: EngineInterface, state: BandState, clips: Clips, durationMs: number) {
+  const text = durationMs >= 120_000 ? 'おまたせ、終わったよ' : '終わったよ'
+  return playCue($, state, clips, state.settings.sound, text, (hour, now) => {
+    const shown = state.nudge !== undefined && now < state.nudge.until ? state.nudge.text : undefined
+    return shown ?? nightLine(hour, undefined, Math.random())
+  })
+}
+
+// Claude が質問のダイアログ（AskUserQuestion）を出したときの声かけ。席を外していても気づけるように
+const QUESTION_LINES = ['ちょっと聞きたいことがあるよ', '質問があるよ。見てくれる？', 'ひとつ選んでほしいことがあるよ']
+const NIGHT_QUESTION_LINE = '夜遅くにごめんね。ひとつ聞きたいことがあるよ'
+
+export function questionLine(previous: unknown, random: number): string {
+  const choices = QUESTION_LINES.filter(line => line !== previous)
+  return choices[Math.floor(random * choices.length) % choices.length] ?? QUESTION_LINES[0]
 }
 
 function tokens(n: number): string {
@@ -456,6 +486,7 @@ export const register: Register = (on, options) => {
     nudge: undefined,
     tzOffsetMin: undefined,
   }
+  let lastQuestionLine: string | undefined
   let timers: { cancel: () => void }[] = []
   let shownPose: Pose | null = null
   let shownSince = 0
@@ -502,6 +533,11 @@ export const register: Register = (on, options) => {
     const id = e.tool_use_id ?? `${e.tool}-${state.runningTools.size}`
     state.runningTools.set(id, e.tool)
     await redrawIfChanged($, state)
+    if (e.tool === 'AskUserQuestion' && !e.agentId) {
+      lastQuestionLine = questionLine(lastQuestionLine, Math.random())
+      // 鳴り終わるのを待たない（ダイアログをすぐ出すため）
+      playCue($, state, clips, settings.questionSound, lastQuestionLine, () => NIGHT_QUESTION_LINE).catch(() => undefined)
+    }
     try {
       return await next(e)
     } finally {
