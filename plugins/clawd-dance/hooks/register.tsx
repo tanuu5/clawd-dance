@@ -293,6 +293,14 @@ const NIGHT_LINES: Record<number, string[]> = {
 // 出した一言を見せておく時間（次に送ったときにも消える）
 const NUDGE_SHOW_MS = 10 * 60_000
 
+// 帯に出すときは「。」で行を分ける（長い一言が折り返して、右側の使用量の列を押し縮めないように）
+export function sentenceLines(text: string): string[] {
+  return text
+    .split(/(?<=。)/)
+    .map(line => line.trim())
+    .filter(line => line !== '')
+}
+
 // その時刻に出す一言。前回と同じ言葉は避ける。0〜4 時台でなければ undefined
 export function nightLine(hour: number, previous: unknown, random: number): string | undefined {
   const lines = NIGHT_LINES[hour]
@@ -704,9 +712,11 @@ export const register: Register = (on, options) => {
         </Box>
         <Box key="nudge" flexGrow={1} marginLeft={2} flexDirection="column">
           {bgText === undefined ? null : <Text key="bg">{bgText}</Text>}
-          {nudgeText === undefined ? null : <Text key="night">💤 {nudgeText}</Text>}
+          {nudgeText === undefined
+            ? null
+            : sentenceLines(nudgeText).map((line, i) => <Text key={`night-${i}`}>{i === 0 ? `💤 ${line}` : `　 ${line}`}</Text>)}
         </Box>
-        <Box flexDirection="column" alignItems="flex-end">
+        <Box flexDirection="column" alignItems="flex-end" flexShrink={0}>
           <Text dimColor={contextPercent < 80} color={contextPercent >= 80 ? 'red' : undefined}>
             {contextLine}
           </Text>

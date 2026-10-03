@@ -1,7 +1,7 @@
 import type { On, SessionRateLimit } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { backgroundText, nightLine, questionLine, settleBackground } from '../hooks/register'
+import { backgroundText, nightLine, questionLine, sentenceLines, settleBackground } from '../hooks/register'
 
 const bandProps = (isWorking: boolean) => ({
   hasSurvey: false,
@@ -108,6 +108,12 @@ describe('夜ふかしの声かけ', () => {
     expect(nightLine(4, undefined, 0.99)).toBe('空が明るくなる前に、おやすみ')
     expect(nightLine(5, undefined, 0)).toBeUndefined()
     expect(nightLine(23, undefined, 0)).toBeUndefined()
+  })
+
+  test('帯では「。」で行を分ける', async () => {
+    expect(sentenceLines('日付が変わったよ。きりのいいところで休もうね')).toEqual(['日付が変わったよ。', 'きりのいいところで休もうね'])
+    expect(sentenceLines('2時だよ。そろそろ寝よう…')).toEqual(['2時だよ。', 'そろそろ寝よう…'])
+    expect(sentenceLines('空が明るくなる前に、おやすみ')).toEqual(['空が明るくなる前に、おやすみ'])
   })
 
   test('前回と同じ言葉は続けない', async () => {
