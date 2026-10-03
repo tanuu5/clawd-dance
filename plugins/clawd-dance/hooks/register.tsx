@@ -14,6 +14,8 @@ import type { AudioClip, EngineInterface, PluginOptions, Register } from 'claude
 const SWEAT_MS = [30_000, 120_000]
 // 一度なったポーズを最低これだけ続ける（Edit などが一瞬で終わっても見えるように）
 const MIN_POSE_MS = 1_500
+// ターンの終わりから、Stop で届く裏の作業の一覧を待つ時間
+const STOP_SETTLE_MS = 300
 
 // 使う人が /config で変えられる設定（plugin.json の userConfig）。値は register の options で届く。
 const SOUND_MODES = ['効果音と声', '効果音だけ', '声だけ', '鳴らさない'] as const
@@ -400,6 +402,85 @@ type BandState = {
   isPaceLoaded: boolean
   nudge: { text: string; until: number } | undefined
   tzOffsetMin: number | undefined
+  timers: { cancel: () => void }[]
+  background: Background
+  // Stop で届いた、まだ動いている裏の作業。ターンの終わりの判断で読んで消す
+  stopTaskIds: string[] | undefined
+  isNotificationTurn: boolean
+  nextIsNotification: boolean
+}
+
+// ---- 裏の作業（バックグラウンドのタスク） ----
+// 本体のターンが終わっても、裏でサブエージェントやコマンドが動いていることがある。
+// そのときは「終わったよ」とは言わず、何個動いているかを知らせ、帯に「2/6 完了」と出す。
+// 裏の作業が 1 つ終わるたびに本体が通知で起こされるが、そのターンの終わりでは何も言わない。
+// 最後の 1 つまで終わったら「ぜんぶ終わったよ」。
+// 動いている作業の一覧は、本体のターンの終わりに届く Stop の background_tasks から読む。
+
+type Background = {
+  // この一連の作業で見かけた作業の id（全体の数）
+  seen: Set<string>
+  // まだ動いている作業の id
+  running: Set<string>
+  // 一連の作業が始まった時刻（「ぜんぶ終わったよ」を鳴らすか決めるため）
+  startedAt: number
+}
+
+// ターンの終わりに鳴らすもの
+export type EndCue = { kind: 'done' } | { kind: 'started'; count: number } | { kind: 'quiet' } | { kind: 'allDone' }
+
+// Stop で届いた一覧を取り込み、鳴らすものを決める
+export function settleBackground(background: Background, runningIds: readonly string[], isNotificationTurn: boolean, turnStartedAt: number): EndCue {
+  const wasRunning = background.running.size > 0
+  background.running = new Set(runningIds)
+  runningIds.forEach(id => background.seen.add(id))
+  if (background.running.size > 0) {
+    if (!wasRunning) background.startedAt = turnStartedAt
+    return isNotificationTurn ? { kind: 'quiet' } : { kind: 'started', count: background.running.size }
+  }
+  if (wasRunning) {
+    background.seen.clear()
+    return { kind: 'allDone' }
+  }
+  return { kind: 'done' }
+}
+
+export function backgroundText(background: Background): string | undefined {
+  if (background.running.size === 0) return undefined
+  const total = background.seen.size
+  return `⏳ バックグラウンド ${total - background.running.size}/${total} 完了`
+}
+
+// 裏の作業の完了通知で始まったターンか。出どころが分からないときは本文の印で見分ける
+function isNotificationText(text: string): boolean {
+  return text.trimStart().startsWith('<task-notification')
+}
+
+// 本体のターンの終わり。Stop が届くのを少し待ってから、ポーズと音を決める
+async function endOfTurn($: EngineInterface, state: BandState, clips: Clips, reason: string, durationMs: number) {
+  const { settings } = state
+  const cue = settleBackground(state.background, state.stopTaskIds ?? [], state.isNotificationTurn, state.turnStartedAt)
+  state.stopTaskIds = undefined
+  const now = await $.clock.now()
+  const isBusy = state.background.running.size > 0
+  state.banzaiUntil = reason === 'answer' && !isBusy ? now + settings.banzaiMs : 0
+  state.timers.push(...[settings.banzaiMs, settings.sleepAfterMs].map(ms => $.clock.after(ms + 50, () => void redrawIfChanged($, state))))
+  await redrawIfChanged($, state)
+
+  if (settings.sound === '鳴らさない' || reason !== 'answer') return
+  if (cue.kind === 'quiet') return
+  if (cue.kind === 'allDone') {
+    // 一連の作業全体の長さで決める（最後の通知のターンは短いことが多い）
+    if (now - state.background.startedAt < settings.soundMinSeconds * 1000) return
+    await playCue($, state, clips, settings.sound, 'バックグラウンドの作業も、ぜんぶ終わったよ', () => undefined)
+    return
+  }
+  if (durationMs < settings.soundMinSeconds * 1000) return
+  if (cue.kind === 'started') {
+    await playCue($, state, clips, settings.sound, `ひと区切りついたよ。バックグラウンドで${cue.count}個動いてるよ`, () => undefined)
+    return
+  }
+  await playEndSound($, state, clips, durationMs)
 }
 
 // 帯に出すもの（ポーズ・汗・数字）を今の状態から決める。描画とイベントの両方が使う。
@@ -416,6 +497,9 @@ async function computeView($: EngineInterface, state: BandState, isWorking: bool
     sweat = SWEAT_MS.filter(ms => elapsed >= ms).length
   } else if (now < state.banzaiUntil) {
     pose = 'banzai'
+  } else if (state.background.running.size > 0) {
+    // 裏の作業を見守る（眠らない）
+    pose = 'look'
   } else if (state.lastDoneAt === 0 || now - state.lastDoneAt >= state.settings.sleepAfterMs) {
     pose = 'sleep'
   } else {
@@ -452,9 +536,10 @@ async function computeView($: EngineInterface, state: BandState, isWorking: bool
       : { kind: limit.kind, percent: limit.percent, text: `${label}  ${barWithTarget(limit.percent, target.target)}  ${limit.percent}%`, pace: target, until }
   })
   const nudgeText = state.nudge !== undefined && now < state.nudge.until ? state.nudge.text : undefined
-  const signature = [pose, sweat, contextLine, ...rateLines.map(line => `${line.text}${line.pace?.text ?? ''}${line.until}`), nudgeText ?? ''].join('|')
+  const bgText = backgroundText(state.background)
+  const signature = [pose, sweat, contextLine, ...rateLines.map(line => `${line.text}${line.pace?.text ?? ''}${line.until}`), nudgeText ?? '', bgText ?? ''].join('|')
 
-  return { now, pose, sweat, contextPercent, contextLine, rateLines, nudgeText, signature }
+  return { now, pose, sweat, contextPercent, contextLine, rateLines, nudgeText, bgText, signature }
 }
 
 // 帯の描き直しは、見た目が変わるときだけにする。描き直すたびに絵がわずかにちらつくため。
@@ -485,17 +570,21 @@ export const register: Register = (on, options) => {
     isPaceLoaded: false,
     nudge: undefined,
     tzOffsetMin: undefined,
+    timers: [],
+    background: { seen: new Set(), running: new Set(), startedAt: 0 },
+    stopTaskIds: undefined,
+    isNotificationTurn: false,
+    nextIsNotification: false,
   }
   let lastQuestionLine: string | undefined
-  let timers: { cancel: () => void }[] = []
   let shownPose: Pose | null = null
   let shownSince = 0
   let holdTimer: { cancel: () => void } | null = null
   let nudgeTimer: { cancel: () => void } | null = null
 
   const resetTimers = () => {
-    timers.forEach(t => t.cancel())
-    timers = []
+    state.timers.forEach(t => t.cancel())
+    state.timers = []
   }
 
   // usage-log の pace.json を 1 分ごとに読み直す（目安が 0:00 で変わる、別のセッションが値を進める）
@@ -504,9 +593,23 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // 裏の作業の完了通知で始まるターンを見分ける（prompt.submit のあとに turn.start が来る）
+  on('prompt.submit', async ($, e, next) => {
+    state.nextIsNotification = e.origin.kind === 'task-notification'
+    return next(e)
+  })
+
+  // 本体のターンの終わりに、まだ動いている裏の作業の一覧が届く
+  on('classic.Stop', async ($, e, next) => {
+    state.stopTaskIds = (e.background_tasks ?? []).map(task => task.id)
+    return next(e)
+  })
+
   on('turn.start', async ($, e, next) => {
+    const isNotification = state.nextIsNotification || isNotificationText(e.text)
+    state.nextIsNotification = false
     // 打ったメッセージで始まるターンなら、前の一言を消し、夜ふかしの時間帯なら新しい一言を出す
-    if (e.text.trim() !== '') {
+    if (e.text.trim() !== '' && !isNotification) {
       state.nudge = undefined
       try {
         if (await maybeNudge($, state)) {
@@ -520,10 +623,11 @@ export const register: Register = (on, options) => {
     // サブエージェントのターンでも呼ばれうるので、本体のターンの始まりだけを数える
     if (!state.isInTurn) {
       state.isInTurn = true
+      state.isNotificationTurn = isNotification
       state.turnStartedAt = await $.clock.now()
       state.banzaiUntil = 0
       resetTimers()
-      timers = SWEAT_MS.map(ms => $.clock.after(ms, () => void redrawIfChanged($, state)))
+      state.timers = SWEAT_MS.map(ms => $.clock.after(ms, () => void redrawIfChanged($, state)))
     }
 
     return next(e)
@@ -555,18 +659,12 @@ export const register: Register = (on, options) => {
     state.isInTurn = false
     state.runningTools.clear()
     state.lastDoneAt = await $.clock.now()
-    state.banzaiUntil = e.reason === 'answer' ? state.lastDoneAt + settings.banzaiMs : 0
     resetTimers()
-    timers = [settings.banzaiMs, settings.sleepAfterMs].map(ms => $.clock.after(ms + 50, () => void redrawIfChanged($, state)))
+    // Stop（裏の作業の一覧）が届くのを少し待ってから、バンザイと音を決める
+    state.timers.push($.clock.after(STOP_SETTLE_MS, () => void endOfTurn($, state, clips, e.reason, e.durationMs).catch(() => undefined)))
     // usage-log がターンの終わりに pace.json を書き直すので、少し待って読む
-    timers.push($.clock.after(3_000, () => void readPace($, state).then(() => redrawIfChanged($, state))))
+    state.timers.push($.clock.after(3_000, () => void readPace($, state).then(() => redrawIfChanged($, state))))
     await redrawIfChanged($, state)
-
-    const seconds = Math.round(e.durationMs / 1000)
-    if (settings.sound !== '鳴らさない' && e.reason === 'answer' && seconds >= settings.soundMinSeconds) {
-      // 鳴り終わるのを待たない（フックの持ち時間を使わないため）
-      playEndSound($, state, clips, e.durationMs).catch(() => undefined)
-    }
 
     return result
   })
@@ -579,7 +677,7 @@ export const register: Register = (on, options) => {
     const { Box, Svg, Text } = $.ui.resolve(e)
     const view = await computeView($, state, e.props.isWorking)
     state.drawnSignature = view.signature
-    const { now, sweat, contextPercent, contextLine, rateLines, nudgeText } = view
+    const { now, sweat, contextPercent, contextLine, rateLines, nudgeText, bgText } = view
     let pose = view.pose
 
     // 前のポーズになってから MIN_POSE_MS たっていなければ前のポーズのまま。残り時間で描き直しを予約する。
@@ -604,8 +702,9 @@ export const register: Register = (on, options) => {
             </Box>
           ))}
         </Box>
-        <Box key="nudge" flexGrow={1} marginLeft={2}>
-          {nudgeText === undefined ? null : <Text>💤 {nudgeText}</Text>}
+        <Box key="nudge" flexGrow={1} marginLeft={2} flexDirection="column">
+          {bgText === undefined ? null : <Text key="bg">{bgText}</Text>}
+          {nudgeText === undefined ? null : <Text key="night">💤 {nudgeText}</Text>}
         </Box>
         <Box flexDirection="column" alignItems="flex-end">
           <Text dimColor={contextPercent < 80} color={contextPercent >= 80 ? 'red' : undefined}>

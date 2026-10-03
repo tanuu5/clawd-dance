@@ -1,7 +1,7 @@
 import type { On, SessionRateLimit } from 'claude-code'
-import { describe, expect, test } from 'claude-code/testing'
+import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { nightLine, questionLine } from '../hooks/register'
+import { backgroundText, nightLine, questionLine, settleBackground } from '../hooks/register'
 
 const bandProps = (isWorking: boolean) => ({
   hasSurvey: false,
@@ -141,5 +141,77 @@ describe('質問のときの声かけ', () => {
     await new Promise(resolve => setTimeout(resolve, 50))
     expect(heard[0]).toBe('♪')
     expect(heard[1]).toMatch(/聞きたい|質問|選んで/)
+  })
+})
+
+describe('裏の作業（バックグラウンド）', () => {
+  const fresh = () => ({ seen: new Set<string>(), running: new Set<string>(), startedAt: 0 })
+
+  test('裏で動いたまま区切れたら個数を知らせ、通知のターンでは黙り、最後に「ぜんぶ」', async () => {
+    const bg = fresh()
+    expect(settleBackground(bg, ['a', 'b', 'c'], false, 100)).toEqual({ kind: 'started', count: 3 })
+    expect(backgroundText(bg)).toBe('⏳ バックグラウンド 0/3 完了')
+    expect(settleBackground(bg, ['b', 'c'], true, 200)).toEqual({ kind: 'quiet' })
+    expect(backgroundText(bg)).toBe('⏳ バックグラウンド 1/3 完了')
+    // 途中で増えたら全体の数も増える
+    expect(settleBackground(bg, ['c', 'd'], true, 300)).toEqual({ kind: 'quiet' })
+    expect(backgroundText(bg)).toBe('⏳ バックグラウンド 2/4 完了')
+    expect(settleBackground(bg, [], true, 400)).toEqual({ kind: 'allDone' })
+    expect(backgroundText(bg)).toBeUndefined()
+    expect(bg.startedAt).toBe(100)
+  })
+
+  test('裏の作業がなければ今までどおり「終わったよ」', async () => {
+    const bg = fresh()
+    expect(settleBackground(bg, [], false, 0)).toEqual({ kind: 'done' })
+  })
+
+  test('裏の作業の途中でも、打ったメッセージへの応答の終わりは知らせる', async () => {
+    const bg = fresh()
+    settleBackground(bg, ['a', 'b'], false, 0)
+    expect(settleBackground(bg, ['b'], false, 0)).toEqual({ kind: 'started', count: 1 })
+  })
+})
+
+describe('裏の作業のときの声（イベントの流れ）', () => {
+  const setup = (on: On) => {
+    on('session.usage', () => ({ value: { startedAt: 0, context: { tokens: 1, window: 1_000_000, percent: 0 }, rateLimits: [] } }))
+    const clock = mock.clock(on, { now: Date.parse('2026-10-03T03:00:00Z') })
+    const heard: string[] = []
+    on('audio.play', () => ({ value: undefined }))
+    on('audio.speak', (_$, e) => {
+      heard.push(e.text)
+      return { value: undefined }
+    })
+    on('process.run', () => ({ value: { stdout: '+0900\n', stderr: '', exitCode: 0 } }))
+    on('ui.invalidate', () => ({ value: undefined }))
+    on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+    on('turn.complete', () => ({ text: 'ok' }) as never)
+    on('classic.Stop', () => ({}) as never)
+    return { clock, heard }
+  }
+  const turn = async ($: never, clock: { advance: (ms: number) => Promise<void> }, text: string, tasks: string[]) => {
+    const api = $ as unknown as { turn: { start: Function; complete: Function }; classic: { Stop: Function } }
+    await api.turn.start({ text, turnId: text })
+    await clock.advance(20_000)
+    await api.classic.Stop({ stop_hook_active: false, background_tasks: tasks.map(id => ({ id, type: 'subagent', status: 'running', description: id })) })
+    await api.turn.complete({ answer: 'ok', durationMs: 20_000, isAborted: false, turnId: text, reason: 'answer' })
+    await clock.advance(1_000)
+  }
+
+  test('区切りで個数、通知では黙り、最後に「ぜんぶ」', async ($, on) => {
+    const { clock, heard } = setup(on)
+    await turn($ as never, clock, '調べて', ['a', 'b'])
+    expect(heard).toEqual(['ひと区切りついたよ。バックグラウンドで2個動いてるよ'])
+    await turn($ as never, clock, '<task-notification>a done</task-notification>', ['b'])
+    expect(heard).toHaveLength(1)
+    await turn($ as never, clock, '<task-notification>b done</task-notification>', [])
+    expect(heard[1]).toBe('バックグラウンドの作業も、ぜんぶ終わったよ')
+  })
+
+  test('裏の作業がなければ「終わったよ」', async ($, on) => {
+    const { clock, heard } = setup(on)
+    await turn($ as never, clock, 'お願い', [])
+    expect(heard).toEqual(['終わったよ'])
   })
 })
