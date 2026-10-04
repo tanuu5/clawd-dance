@@ -1,7 +1,7 @@
 import type { On, SessionRateLimit } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { backgroundText, barSvg, meterColor, nightLine, questionLine, sentenceLines, settleBackground } from '../hooks/register'
+import { backgroundText, barSvg, meterColor, shortUntil, nightLine, questionLine, sentenceLines, settleBackground } from '../hooks/register'
 
 const bandProps = (isWorking: boolean) => ({
   hasSurvey: false,
@@ -247,8 +247,9 @@ describe('使用量の棒', () => {
       { kind: 'seven_day', percentUsed: 67, resetsAt: '2026-10-05T11:00:00.000Z' },
     ])
     const ui = await $.ui.mount({ plugin: 'clawd-dance', surface: 'desktop', component: 'AbovePrompt', props: bandProps(false) })
-    expect(await ui.find({ type: 'Text', text: '目安61%（土 0:00）' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '目安61%' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '超過6' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '残3日' })).toBeDefined()
     expect(await ui.findAll({ type: 'Svg' })).toHaveLength(19)
     await ui.unmount()
   })
@@ -259,5 +260,16 @@ describe('使用量の棒', () => {
     expect(barSvg(80).match(/fill="#E0575B"/g)).toHaveLength(8)
     expect(barSvg(80, 98)).toContain('fill="#7A7F86"')
     expect(meterColor(79)).toBe('#5B7491')
+  })
+})
+
+describe('残り時間の短い書き方', () => {
+  test('1 時間未満は分、1 日未満は時と分、2 日未満は時、それ以上は日', async () => {
+    const now = Date.parse('2026-10-04T00:00:00Z')
+    const after = (minutes: number) => new Date(now + minutes * 60_000).toISOString()
+    expect(shortUntil(after(42), now)).toBe('残42m')
+    expect(shortUntil(after(4 * 60 + 17), now)).toBe('残4h17m')
+    expect(shortUntil(after(30 * 60 + 51), now)).toBe('残30h')
+    expect(shortUntil(after(3 * 1440), now)).toBe('残3日')
   })
 })

@@ -305,7 +305,8 @@ function paceFor(pace: PaceFile | undefined, resetsAt: string | undefined, perce
   const margin = next.pct - percent
   const targetText = `目安${next.pct}%（${next.label}）`
   const marginText = margin < 0 ? `超過${Math.round(-margin * 10) / 10}` : `あと${Math.round(margin * 10) / 10}`
-  return { target: next.pct, isOver: margin < 0, text: `${targetText}${marginText}`, targetText, marginText }
+  const shortMargin = margin < 0 ? `超過${Math.round(-margin * 10) / 10}` : `残${Math.round(margin * 10) / 10}`
+  return { target: next.pct, isOver: margin < 0, text: `${targetText}${marginText}`, targetText, marginText, shortTarget: `目安${next.pct}%`, shortMargin }
 }
 
 // ---- 夜ふかしの声かけ ----
@@ -428,6 +429,16 @@ function untilReset(resetsAt: string | undefined, now: number): string {
   return `あと${minutes}分`
 }
 
+// グラフィカルな表示の短い書き方：残42m／残4h17m（1 日未満）／残30h（2 日未満）／残3日
+export function shortUntil(resetsAt: string | undefined, now: number): string {
+  if (!resetsAt) return ''
+  const minutes = Math.max(0, Math.round((Date.parse(resetsAt) - now) / 60_000))
+  if (minutes < 60) return `残${minutes}m`
+  if (minutes < 24 * 60) return `残${Math.floor(minutes / 60)}h${minutes % 60}m`
+  if (minutes < 48 * 60) return `残${Math.floor(minutes / 60)}h`
+  return `残${Math.round(minutes / 1440)}日`
+}
+
 // 帯の描画に使う状態。register の中で 1 つ作り、各フックと描画が同じものを読み書きする。
 type BandState = {
   settings: Settings
@@ -522,8 +533,8 @@ async function endOfTurn($: EngineInterface, state: BandState, clips: Clips, rea
   await playEndSound($, state, clips, durationMs)
 }
 
-// details は行の並び。1 行は「│ 文字」の並び
-type Meter = { key: string; label: string; percent: number | undefined; target: number | undefined; details: { text: string; color?: string }[][] }
+// details は「│ 文字」の並び（1 行）
+type Meter = { key: string; label: string; percent: number | undefined; target: number | undefined; details: { text: string; color?: string }[] }
 
 // 帯に出すもの（ポーズ・汗・数字）を今の状態から決める。描画とイベントの両方が使う。
 async function computeView($: EngineInterface, state: BandState, isWorking: boolean) {
@@ -574,8 +585,8 @@ async function computeView($: EngineInterface, state: BandState, isWorking: bool
     const target = limit.kind === 'seven_day' ? paceFor(pace, limit.resetsAt, limit.percent, now) : undefined
     const until = untilReset(limit.resetsAt, now)
     return target === undefined
-      ? { kind: limit.kind, percent: limit.percent, text: `${label}  ${bar(limit.percent)}  ${limit.percent}%  ${until}`, pace: undefined, until }
-      : { kind: limit.kind, percent: limit.percent, text: `${label}  ${barWithTarget(limit.percent, target.target)}  ${limit.percent}%`, pace: target, until }
+      ? { kind: limit.kind, percent: limit.percent, text: `${label}  ${bar(limit.percent)}  ${limit.percent}%  ${until}`, pace: undefined, until, short: shortUntil(limit.resetsAt, now) }
+      : { kind: limit.kind, percent: limit.percent, text: `${label}  ${barWithTarget(limit.percent, target.target)}  ${limit.percent}%`, pace: target, until, short: shortUntil(limit.resetsAt, now) }
   })
   // グラフィカルな表示の行：見出し・使用率・棒の目安・右の説明
   const meters: Meter[] = [
@@ -584,20 +595,21 @@ async function computeView($: EngineInterface, state: BandState, isWorking: bool
       label: 'コンテキスト',
       percent: context.percent,
       target: undefined,
-      details: [[{ text: context.percent === undefined ? 'まだ計測なし' : `${tokens(context.tokens ?? 0)} / ${tokens(context.window)}` }]],
+      details: [{ text: context.percent === undefined ? 'まだ計測なし' : `${tokens(context.tokens ?? 0)} / ${tokens(context.window)}` }],
     },
     ...rateLines.map(line => ({
       key: line.kind,
       label: RATE_LIMIT_LABELS[line.kind] ?? line.kind,
       percent: line.percent as number | undefined,
       target: line.pace?.target,
-      // 目安があるときは 2 行にする（右の列の幅を抑え、Clawd の横の一言の場所を残す）
+      // 短い書き方で 1 行に収める（右の列の幅を抑え、Clawd の横の一言の場所を残す）
       details:
         line.pace === undefined
-          ? [[{ text: line.until }]]
+          ? [{ text: line.short }]
           : [
-              [{ text: line.pace.targetText, color: line.pace.isOver ? 'red' : 'green' }],
-              [{ text: line.pace.marginText, color: line.pace.isOver ? 'red' : 'green' }, { text: line.until }],
+              { text: line.pace.shortTarget, color: line.pace.isOver ? 'red' : 'green' },
+              { text: line.pace.shortMargin, color: line.pace.isOver ? 'red' : 'green' },
+              { text: line.short },
             ],
     })),
   ]
@@ -761,10 +773,11 @@ export const register: Register = (on, options) => {
 
     return (
       <Box flexDirection="row" alignItems="center" justifyContent="space-between" width="100%">
+        {/* 画像として描く（isInteractive の枠は背景が白く、ダークモードで四角く浮いた） */}
         <Box key="clawd">
           {VARIANTS.map(variant => (
             <Box key={variant.id} display={variant.id === shownId ? 'flex' : 'none'}>
-              <Svg source={variant.source} alt={POSE_ALT[variant.pose]} width={68} height={52} isInteractive />
+              <Svg source={variant.source} alt={POSE_ALT[variant.pose]} width={68} height={52} />
             </Box>
           ))}
         </Box>
@@ -775,40 +788,47 @@ export const register: Register = (on, options) => {
             : sentenceLines(nudgeText).map((line, i) => <Text key={`night-${i}`}>{i === 0 ? `💤 ${line}` : `　 ${line}`}</Text>)}
         </Box>
         {settings.barStyle === 'グラフィカル' ? (
-          <Box flexDirection="column" flexShrink={0} gap={0}>
-            {meters.map(meter => (
-              <Box key={meter.key} flexDirection="row" alignItems="flex-start" gap={1}>
-                <Box key="label" width={13}>
-                  <Text>{meter.label}</Text>
-                </Box>
-                <Box key="bar" height={1} alignItems="center">
+          // 見出し・棒・使用率・説明を列ごとに並べる（各列が中身の幅になり、行はどれも 1 行の高さ）
+          <Box flexDirection="row" flexShrink={0} gap={1}>
+            <Box key="labels" flexDirection="column">
+              {meters.map(meter => (
+                <Text key={meter.key}>{meter.label}</Text>
+              ))}
+            </Box>
+            <Box key="bars" flexDirection="column">
+              {meters.map(meter => (
+                <Box key={meter.key} height={1} alignItems="center">
                   {meter.percent === undefined ? (
                     <Text dimColor>―</Text>
                   ) : (
-                    <Svg key={`bar-${meter.key}`} source={barSvg(meter.percent, meter.target)} alt={`${meter.label} ${meter.percent}%`} width={150} height={8} />
+                    <Svg source={barSvg(meter.percent, meter.target)} alt={`${meter.label} ${meter.percent}%`} width={150} height={8} />
                   )}
                 </Box>
-                <Box key="percent" width={5} justifyContent="flex-end">
-                  {meter.percent === undefined ? null : (
-                    <Text bold color={meterColor(meter.percent)}>
-                      {`${meter.percent}%`}
-                    </Text>
-                  )}
-                </Box>
-                <Box key="details" flexDirection="column">
-                  {meter.details.map((row, r) => (
-                    <Box key={`r${r}`} flexDirection="row" gap={1}>
-                      {row.map((detail, i) => (
-                        <Box key={`d${i}`} flexDirection="row" gap={1}>
-                          <Text dimColor>│</Text>
-                          {detail.color === undefined ? <Text dimColor>{detail.text}</Text> : <Text color={detail.color}>{detail.text}</Text>}
-                        </Box>
-                      ))}
+              ))}
+            </Box>
+            <Box key="percents" flexDirection="column" alignItems="flex-end">
+              {meters.map(meter =>
+                meter.percent === undefined ? (
+                  <Text key={meter.key}> </Text>
+                ) : (
+                  <Text key={meter.key} bold color={meterColor(meter.percent)}>
+                    {`${meter.percent}%`}
+                  </Text>
+                ),
+              )}
+            </Box>
+            <Box key="details" flexDirection="column">
+              {meters.map(meter => (
+                <Box key={meter.key} flexDirection="row" gap={1}>
+                  {meter.details.map((detail, i) => (
+                    <Box key={`d${i}`} flexDirection="row" gap={1}>
+                      <Text dimColor>│</Text>
+                      {detail.color === undefined ? <Text dimColor>{detail.text}</Text> : <Text color={detail.color}>{detail.text}</Text>}
                     </Box>
                   ))}
                 </Box>
-              </Box>
-            ))}
+              ))}
+            </Box>
           </Box>
         ) : (
           <Box flexDirection="column" alignItems="flex-end" flexShrink={0}>
