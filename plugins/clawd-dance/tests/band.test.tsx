@@ -215,6 +215,16 @@ describe('裏の作業のときの声（イベントの流れ）', () => {
     expect(heard[1]).toBe('バックグラウンドの作業も、ぜんぶ終わったよ')
   })
 
+  test('別の mod が送ったプロンプトのターン（放置中の /compact など）では声を出さない', async ($, on) => {
+    const { clock, heard } = setup(on)
+    on('prompt.submit', (_$, e) => ({ text: e.text }))
+    await $.prompt.submit({ text: '/compact keep the plan', origin: { kind: 'plugin', name: 'idle-compact' } } as never)
+    await turn($ as never, clock, '/compact keep the plan', [])
+    expect(heard).toEqual([])
+    await turn($ as never, clock, 'お願い', [])
+    expect(heard).toEqual(['終わったよ'])
+  })
+
   test('裏の作業がなければ「終わったよ」', async ($, on) => {
     const { clock, heard } = setup(on)
     await turn($ as never, clock, 'お願い', [])

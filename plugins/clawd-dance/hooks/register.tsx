@@ -458,6 +458,9 @@ type BandState = {
   stopTaskIds: string[] | undefined
   isNotificationTurn: boolean
   nextIsNotification: boolean
+  // 別の mod が送ったプロンプトのターン（idle-compact の /compact など）。放置中に動くので声を出さない
+  isPluginTurn: boolean
+  nextIsPlugin: boolean
 }
 
 // ---- 裏の作業（バックグラウンドのタスク） ----
@@ -518,7 +521,7 @@ async function endOfTurn($: EngineInterface, state: BandState, clips: Clips, rea
   await redrawIfChanged($, state)
 
   if (settings.sound === '鳴らさない' || reason !== 'answer') return
-  if (cue.kind === 'quiet') return
+  if (cue.kind === 'quiet' || state.isPluginTurn) return
   if (cue.kind === 'allDone') {
     // 一連の作業全体の長さで決める（最後の通知のターンは短いことが多い）
     if (now - state.background.startedAt < settings.soundMinSeconds * 1000) return
@@ -653,6 +656,8 @@ export const register: Register = (on, options) => {
     stopTaskIds: undefined,
     isNotificationTurn: false,
     nextIsNotification: false,
+    isPluginTurn: false,
+    nextIsPlugin: false,
   }
   let lastQuestionLine: string | undefined
   let shownPose: Pose | null = null
@@ -674,6 +679,7 @@ export const register: Register = (on, options) => {
   // 裏の作業の完了通知で始まるターンを見分ける（prompt.submit のあとに turn.start が来る）
   on('prompt.submit', async ($, e, next) => {
     state.nextIsNotification = e.origin.kind === 'task-notification'
+    state.nextIsPlugin = e.origin.kind === 'plugin'
     return next(e)
   })
 
@@ -685,9 +691,11 @@ export const register: Register = (on, options) => {
 
   on('turn.start', async ($, e, next) => {
     const isNotification = state.nextIsNotification || isNotificationText(e.text)
+    const isPlugin = state.nextIsPlugin
     state.nextIsNotification = false
+    state.nextIsPlugin = false
     // 打ったメッセージで始まるターンなら、前の一言を消し、夜ふかしの時間帯なら新しい一言を出す
-    if (e.text.trim() !== '' && !isNotification) {
+    if (e.text.trim() !== '' && !isNotification && !isPlugin) {
       state.nudge = undefined
       try {
         if (await maybeNudge($, state)) {
@@ -702,6 +710,7 @@ export const register: Register = (on, options) => {
     if (!state.isInTurn) {
       state.isInTurn = true
       state.isNotificationTurn = isNotification
+      state.isPluginTurn = isPlugin
       state.turnStartedAt = await $.clock.now()
       state.banzaiUntil = 0
       resetTimers()
