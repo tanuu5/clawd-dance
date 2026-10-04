@@ -1,7 +1,7 @@
 import type { On, SessionRateLimit } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { backgroundText, nightLine, questionLine, sentenceLines, settleBackground } from '../hooks/register'
+import { backgroundText, barSvg, meterColor, nightLine, questionLine, sentenceLines, settleBackground } from '../hooks/register'
 
 const bandProps = (isWorking: boolean) => ({
   hasSurvey: false,
@@ -29,7 +29,7 @@ const engine = (on: On) => {
 }
 
 describe('帯', () => {
-  test('デスクトップでは全ポーズの絵を置き、1 枚だけ見せる', async ($, on) => {
+  test('デスクトップでは全ポーズの絵を置き、1 枚だけ見せる', { options: { bar_style: 'テキスト' } }, async ($, on) => {
     engine(on)
     for (const isWorking of [true, false]) {
       const ui = await $.ui.mount({ plugin: 'clawd-dance', surface: 'desktop', component: 'AbovePrompt', props: bandProps(isWorking) })
@@ -75,7 +75,7 @@ const engineWithPace = (on: On, rateLimits: SessionRateLimit[]) => {
 }
 
 describe('7日枠の目安（usage-log の pace.json）', () => {
-  test('7日枠の行に目安と超過を足す', async ($, on) => {
+  test('7日枠の行に目安と超過を足す', { options: { bar_style: 'テキスト' } }, async ($, on) => {
     engineWithPace(on, [
       { kind: 'five_hour', percentUsed: 14, resetsAt: '2026-10-02T12:00:00Z' },
       { kind: 'seven_day', percentUsed: 67, resetsAt: '2026-10-05T11:00:00.000Z' },
@@ -86,7 +86,7 @@ describe('7日枠の目安（usage-log の pace.json）', () => {
     await ui.unmount()
   })
 
-  test('最初の応答の前は、pace.json の値で 5時間枠・7日枠を出す', async ($, on) => {
+  test('最初の応答の前は、pace.json の値で 5時間枠・7日枠を出す', { options: { bar_style: 'テキスト' } }, async ($, on) => {
     engineWithPace(on, [])
     const ui = await $.ui.mount({ plugin: 'clawd-dance', surface: 'desktop', component: 'AbovePrompt', props: bandProps(false) })
     expect(await ui.find({ type: 'Text', text: /5時間枠.*9%/ })).toBeDefined()
@@ -219,5 +219,45 @@ describe('裏の作業のときの声（イベントの流れ）', () => {
     const { clock, heard } = setup(on)
     await turn($ as never, clock, 'お願い', [])
     expect(heard).toEqual(['終わったよ'])
+  })
+})
+
+describe('使用量の棒', () => {
+  test('グラフィカル（既定）では、コンテキストと各枠を色付きの棒で描く', async ($, on) => {
+    engine(on)
+    const ui = await $.ui.mount({ plugin: 'clawd-dance', surface: 'desktop', component: 'AbovePrompt', props: bandProps(false) })
+    // Clawd の絵 16 枚に、コンテキストと 5時間枠の棒 2 本
+    expect(await ui.findAll({ type: 'Svg' })).toHaveLength(18)
+    expect(await ui.find({ type: 'Text', text: '20%' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /200k \/ 1\.0M/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('テキストを選ぶと、今までどおり ▰▱ の文字で出す', { options: { bar_style: 'テキスト' } }, async ($, on) => {
+    engine(on)
+    const ui = await $.ui.mount({ plugin: 'clawd-dance', surface: 'desktop', component: 'AbovePrompt', props: bandProps(false) })
+    expect(await ui.findAll({ type: 'Svg' })).toHaveLength(16)
+    expect(await ui.find({ type: 'Text', text: /コンテキスト  ▰▰▱/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('グラフィカルでも 7日枠の目安と超過を右に出す', async ($, on) => {
+    engineWithPace(on, [
+      { kind: 'five_hour', percentUsed: 14, resetsAt: '2026-10-02T12:00:00Z' },
+      { kind: 'seven_day', percentUsed: 67, resetsAt: '2026-10-05T11:00:00.000Z' },
+    ])
+    const ui = await $.ui.mount({ plugin: 'clawd-dance', surface: 'desktop', component: 'AbovePrompt', props: bandProps(false) })
+    expect(await ui.find({ type: 'Text', text: '目安61%（土 0:00）' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '超過6' })).toBeDefined()
+    expect(await ui.findAll({ type: 'Svg' })).toHaveLength(19)
+    await ui.unmount()
+  })
+
+  test('埋まる区切りの数と色、目安の縦線', async () => {
+    const svg = barSvg(32)
+    expect(svg.match(/fill="#5B7491"/g)).toHaveLength(3)
+    expect(barSvg(80).match(/fill="#E0575B"/g)).toHaveLength(8)
+    expect(barSvg(80, 98)).toContain('fill="#7A7F86"')
+    expect(meterColor(79)).toBe('#5B7491')
   })
 })

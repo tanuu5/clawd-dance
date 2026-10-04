@@ -21,6 +21,8 @@ const STOP_SETTLE_MS = 300
 const SOUND_MODES = ['効果音と声', '効果音だけ', '声だけ', '鳴らさない'] as const
 type SoundMode = (typeof SOUND_MODES)[number]
 const NIGHT_SOUND_MODES = ['眠そうな音とひとこと', 'いつもどおり', '鳴らさない'] as const
+const BAR_STYLES = ['グラフィカル', 'テキスト'] as const
+type BarStyle = (typeof BAR_STYLES)[number]
 type NightSoundMode = (typeof NIGHT_SOUND_MODES)[number]
 
 type Settings = {
@@ -34,6 +36,7 @@ type Settings = {
   nightNudgeMs: number
   nightSound: NightSoundMode
   questionSound: SoundMode
+  barStyle: BarStyle
 }
 
 function readSettings(options: PluginOptions): Settings {
@@ -50,6 +53,7 @@ function readSettings(options: PluginOptions): Settings {
     nightNudgeMs: num('night_nudge_minutes', 0) * 60_000,
     nightSound: NIGHT_SOUND_MODES.find(mode => mode === options.night_sound) ?? '眠そうな音とひとこと',
     questionSound: SOUND_MODES.find(mode => mode === options.question_sound) ?? '効果音と声',
+    barStyle: BAR_STYLES.find(style => style === options.bar_style) ?? 'グラフィカル',
   }
 }
 
@@ -234,6 +238,35 @@ function barWithTarget(percent: number, target: number): string {
   return cells.join('')
 }
 
+// ---- グラフィカルな棒 ----
+// 角の丸い 10 個の区切り。埋まった数は文字の棒（▰▱）と同じく 10% 単位。目安があれば区切りの間に縦線を引く。
+// 動かない画像として描く（isInteractive にしない）ので、中身が変わっても枠の読み込み直しは起きない。
+const BAR_COLOR = '#5B7491'
+const BAR_ALERT = '#E0575B'
+const BAR_EMPTY = 'rgba(128,128,128,0.28)'
+const BAR_MARKER = '#7A7F86'
+const SEG_W = 20
+const SEG_GAP = 3
+const BAR_W = SEG_W * 10 + SEG_GAP * 9
+
+export const meterColor = (percent: number) => (percent >= 80 ? BAR_ALERT : BAR_COLOR)
+
+export function barSvg(percent: number, target?: number): string {
+  const filled = Math.max(0, Math.min(10, Math.round(percent / 10)))
+  const color = meterColor(percent)
+  const segments = Array.from(
+    { length: 10 },
+    (_, i) => `<rect x="${i * (SEG_W + SEG_GAP)}" y="1" width="${SEG_W}" height="8" rx="4" fill="${i < filled ? color : BAR_EMPTY}"/>`,
+  ).join('')
+  let marker = ''
+  if (target !== undefined) {
+    const k = Math.max(0, Math.min(10, Math.round(target / 10)))
+    const x = Math.max(0, Math.min(BAR_W - 2, k * (SEG_W + SEG_GAP) - SEG_GAP / 2 - 1))
+    marker = `<rect x="${x}" y="-1" width="2" height="12" rx="1" fill="${BAR_MARKER}"/>`
+  }
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -1 ${BAR_W} 12">${segments}${marker}</svg>`
+}
+
 // ---- 7日枠の目安（usage-log mod が書く pace.json） ----
 // usage-log は 5時間枠・7日枠の値と、今週の目安の時点（時刻・累計 %・ラベル）を ~/.claude/usage-log/pace.json に書く。
 // あれば 7日枠の行に目安を足し、最初の応答の前（このセッションがまだ値を持たない間）は枠の値もそこから出す。
@@ -270,11 +303,9 @@ function paceFor(pace: PaceFile | undefined, resetsAt: string | undefined, perce
   const next = pace.checkpoints.find(c => c.at + shift > now)
   if (next === undefined) return undefined
   const margin = next.pct - percent
-  return {
-    target: next.pct,
-    isOver: margin < 0,
-    text: `目安${next.pct}%（${next.label}）${margin < 0 ? `超過${Math.round(-margin * 10) / 10}` : `あと${Math.round(margin * 10) / 10}`}`,
-  }
+  const targetText = `目安${next.pct}%（${next.label}）`
+  const marginText = margin < 0 ? `超過${Math.round(-margin * 10) / 10}` : `あと${Math.round(margin * 10) / 10}`
+  return { target: next.pct, isOver: margin < 0, text: `${targetText}${marginText}`, targetText, marginText }
 }
 
 // ---- 夜ふかしの声かけ ----
@@ -491,6 +522,9 @@ async function endOfTurn($: EngineInterface, state: BandState, clips: Clips, rea
   await playEndSound($, state, clips, durationMs)
 }
 
+// details は行の並び。1 行は「│ 文字」の並び
+type Meter = { key: string; label: string; percent: number | undefined; target: number | undefined; details: { text: string; color?: string }[][] }
+
 // 帯に出すもの（ポーズ・汗・数字）を今の状態から決める。描画とイベントの両方が使う。
 async function computeView($: EngineInterface, state: BandState, isWorking: boolean) {
   const { context, rateLimits } = await $.session.usage()
@@ -543,11 +577,35 @@ async function computeView($: EngineInterface, state: BandState, isWorking: bool
       ? { kind: limit.kind, percent: limit.percent, text: `${label}  ${bar(limit.percent)}  ${limit.percent}%  ${until}`, pace: undefined, until }
       : { kind: limit.kind, percent: limit.percent, text: `${label}  ${barWithTarget(limit.percent, target.target)}  ${limit.percent}%`, pace: target, until }
   })
+  // グラフィカルな表示の行：見出し・使用率・棒の目安・右の説明
+  const meters: Meter[] = [
+    {
+      key: 'context',
+      label: 'コンテキスト',
+      percent: context.percent,
+      target: undefined,
+      details: [[{ text: context.percent === undefined ? 'まだ計測なし' : `${tokens(context.tokens ?? 0)} / ${tokens(context.window)}` }]],
+    },
+    ...rateLines.map(line => ({
+      key: line.kind,
+      label: RATE_LIMIT_LABELS[line.kind] ?? line.kind,
+      percent: line.percent as number | undefined,
+      target: line.pace?.target,
+      // 目安があるときは 2 行にする（右の列の幅を抑え、Clawd の横の一言の場所を残す）
+      details:
+        line.pace === undefined
+          ? [[{ text: line.until }]]
+          : [
+              [{ text: line.pace.targetText, color: line.pace.isOver ? 'red' : 'green' }],
+              [{ text: line.pace.marginText, color: line.pace.isOver ? 'red' : 'green' }, { text: line.until }],
+            ],
+    })),
+  ]
   const nudgeText = state.nudge !== undefined && now < state.nudge.until ? state.nudge.text : undefined
   const bgText = backgroundText(state.background)
   const signature = [pose, sweat, contextLine, ...rateLines.map(line => `${line.text}${line.pace?.text ?? ''}${line.until}`), nudgeText ?? '', bgText ?? ''].join('|')
 
-  return { now, pose, sweat, contextPercent, contextLine, rateLines, nudgeText, bgText, signature }
+  return { now, pose, sweat, contextPercent, contextLine, rateLines, meters, nudgeText, bgText, signature }
 }
 
 // 帯の描き直しは、見た目が変わるときだけにする。描き直すたびに絵がわずかにちらつくため。
@@ -685,7 +743,7 @@ export const register: Register = (on, options) => {
     const { Box, Svg, Text } = $.ui.resolve(e)
     const view = await computeView($, state, e.props.isWorking)
     state.drawnSignature = view.signature
-    const { now, sweat, contextPercent, contextLine, rateLines, nudgeText, bgText } = view
+    const { now, sweat, contextPercent, contextLine, rateLines, meters, nudgeText, bgText } = view
     let pose = view.pose
 
     // 前のポーズになってから MIN_POSE_MS たっていなければ前のポーズのまま。残り時間で描き直しを予約する。
@@ -716,26 +774,64 @@ export const register: Register = (on, options) => {
             ? null
             : sentenceLines(nudgeText).map((line, i) => <Text key={`night-${i}`}>{i === 0 ? `💤 ${line}` : `　 ${line}`}</Text>)}
         </Box>
-        <Box flexDirection="column" alignItems="flex-end" flexShrink={0}>
-          <Text dimColor={contextPercent < 80} color={contextPercent >= 80 ? 'red' : undefined}>
-            {contextLine}
-          </Text>
-          {rateLines.map(line =>
-            line.pace === undefined ? (
-              <Text key={line.kind} dimColor={line.percent < 80} color={line.percent >= 80 ? 'red' : undefined}>
-                {line.text}
-              </Text>
-            ) : (
-              <Box key={line.kind} flexDirection="row" gap={2}>
-                <Text dimColor={line.percent < 80} color={line.percent >= 80 ? 'red' : undefined}>
+        {settings.barStyle === 'グラフィカル' ? (
+          <Box flexDirection="column" flexShrink={0} gap={0}>
+            {meters.map(meter => (
+              <Box key={meter.key} flexDirection="row" alignItems="flex-start" gap={1}>
+                <Box key="label" width={13}>
+                  <Text>{meter.label}</Text>
+                </Box>
+                <Box key="bar" height={1} alignItems="center">
+                  {meter.percent === undefined ? (
+                    <Text dimColor>―</Text>
+                  ) : (
+                    <Svg key={`bar-${meter.key}`} source={barSvg(meter.percent, meter.target)} alt={`${meter.label} ${meter.percent}%`} width={150} height={8} />
+                  )}
+                </Box>
+                <Box key="percent" width={5} justifyContent="flex-end">
+                  {meter.percent === undefined ? null : (
+                    <Text bold color={meterColor(meter.percent)}>
+                      {`${meter.percent}%`}
+                    </Text>
+                  )}
+                </Box>
+                <Box key="details" flexDirection="column">
+                  {meter.details.map((row, r) => (
+                    <Box key={`r${r}`} flexDirection="row" gap={1}>
+                      {row.map((detail, i) => (
+                        <Box key={`d${i}`} flexDirection="row" gap={1}>
+                          <Text dimColor>│</Text>
+                          {detail.color === undefined ? <Text dimColor>{detail.text}</Text> : <Text color={detail.color}>{detail.text}</Text>}
+                        </Box>
+                      ))}
+                    </Box>
+                  ))}
+                </Box>
+              </Box>
+            ))}
+          </Box>
+        ) : (
+          <Box flexDirection="column" alignItems="flex-end" flexShrink={0}>
+            <Text dimColor={contextPercent < 80} color={contextPercent >= 80 ? 'red' : undefined}>
+              {contextLine}
+            </Text>
+            {rateLines.map(line =>
+              line.pace === undefined ? (
+                <Text key={line.kind} dimColor={line.percent < 80} color={line.percent >= 80 ? 'red' : undefined}>
                   {line.text}
                 </Text>
-                <Text color={line.pace.isOver ? 'red' : 'green'}>{line.pace.text}</Text>
-                <Text dimColor>{line.until}</Text>
-              </Box>
-            ),
-          )}
-        </Box>
+              ) : (
+                <Box key={line.kind} flexDirection="row" gap={2}>
+                  <Text dimColor={line.percent < 80} color={line.percent >= 80 ? 'red' : undefined}>
+                    {line.text}
+                  </Text>
+                  <Text color={line.pace.isOver ? 'red' : 'green'}>{line.pace.text}</Text>
+                  <Text dimColor>{line.until}</Text>
+                </Box>
+              ),
+            )}
+          </Box>
+        )}
       </Box>
     )
   })

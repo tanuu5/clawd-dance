@@ -1,6 +1,6 @@
 {
   "name": "clawd-dance",
-  "version": "0.15.1",
+  "version": "0.16.0",
   "description": "入力欄の上の帯で、作業に合わせて Clawd（二次創作版）が踊り、使用量も表示する",
   "author": {
     "name": "たぬ"
@@ -90,6 +90,16 @@
         "鳴らさない"
       ],
       "default": "効果音と声"
+    },
+    "bar_style": {
+      "type": "string",
+      "title": "使用量の棒の見た目",
+      "description": "グラフィカルは角の丸い色付きの棒、テキストは ▰▱ の文字の棒",
+      "options": [
+        "グラフィカル",
+        "テキスト"
+      ],
+      "default": "グラフィカル"
     }
   }
 }
