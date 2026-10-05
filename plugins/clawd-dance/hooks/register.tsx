@@ -683,6 +683,18 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // 別の mod が実行したコマンド（idle-compact の /compact など）。その中で動くターンも声を出さない
+  on('command.run', async ($, e, next) => {
+    if (e.origin.kind !== 'plugin') return next(e)
+    state.nextIsPlugin = true
+    try {
+      return await next(e)
+    } finally {
+      // ターンが起きなかったときに、次の本物のターンまで黙らせないよう戻す
+      state.nextIsPlugin = false
+    }
+  })
+
   // 本体のターンの終わりに、まだ動いている裏の作業の一覧が届く
   on('classic.Stop', async ($, e, next) => {
     state.stopTaskIds = (e.background_tasks ?? []).map(task => task.id)
