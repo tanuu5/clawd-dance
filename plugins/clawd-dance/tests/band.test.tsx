@@ -1,7 +1,7 @@
 import type { On, SessionRateLimit } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { backgroundText, barSvg, meterColor, shortUntil, nightLine, questionLine, sentenceLines, settleBackground } from '../hooks/register'
+import { backgroundText, barSvg, isDialogTool, meterColor, permissionLine, shortUntil, nightLine, questionLine, sentenceLines, settleBackground } from '../hooks/register'
 
 const bandProps = (isWorking: boolean) => ({
   hasSurvey: false,
@@ -147,6 +147,62 @@ describe('質問のときの声かけ', () => {
     await new Promise(resolve => setTimeout(resolve, 50))
     expect(heard[0]).toBe('♪')
     expect(heard[1]).toMatch(/聞きたい|質問|選んで/)
+  })
+})
+
+describe('許可のときの声かけ', () => {
+  const listen = (on: On) => {
+    const heard: string[] = []
+    on('audio.play', () => {
+      heard.push('♪')
+      return { value: undefined }
+    })
+    on('audio.speak', (_$, e) => {
+      heard.push(e.text)
+      return { value: undefined }
+    })
+    on('process.run', () => ({ value: { stdout: '+0900\n', stderr: '', exitCode: 0 } }))
+    on('classic.PermissionRequest', () => ({}) as never)
+    on('classic.Notification', () => ({}) as never)
+    return heard
+  }
+
+  test('道具ごとに言葉を選び、前回と同じ言葉は続けない', async () => {
+    expect(permissionLine('mcp__computer-use__request_access', undefined, 0)).toMatch(/アプリ/)
+    expect(permissionLine('ExitPlanMode', undefined, 0)).toMatch(/計画/)
+    for (const random of [0, 0.4, 0.99]) {
+      expect(permissionLine('Bash', 'ひとつ確認させてね', random)).not.toBe('ひとつ確認させてね')
+    }
+    expect(isDialogTool('mcp__computer-use__request_access')).toBe(true)
+    expect(isDialogTool('mcp__computer-use__screenshot')).toBe(false)
+  })
+
+  test('アプリの許可のダイアログを出す道具が呼ばれたら、効果音のあとに読み上げる', async ($, on) => {
+    engine(on)
+    const heard = listen(on)
+    on('tool.call', () => ({ result: {} }) as never)
+    await $.tool.call({ tool: 'mcp__computer-use__request_access', apps: [] } as never)
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(heard[0]).toBe('♪')
+    expect(heard[1]).toMatch(/アプリ/)
+  })
+
+  test('許可のダイアログ（PermissionRequest）で知らせ、続く通知では重ねて鳴らさない', async ($, on) => {
+    engine(on)
+    const heard = listen(on)
+    await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'ls' } } as never)
+    await $.classic.Notification({ message: 'Claude needs your permission to use Bash', notification_type: 'permission_prompt' } as never)
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(heard.filter(text => text === '♪')).toHaveLength(1)
+    expect(heard[1]).toMatch(/確認|許可/)
+  })
+
+  test('質問のダイアログ（AskUserQuestion）には許可の声を重ねない', async ($, on) => {
+    engine(on)
+    const heard = listen(on)
+    await $.classic.PermissionRequest({ tool_name: 'AskUserQuestion', tool_input: {} } as never)
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(heard).toHaveLength(0)
   })
 })
 

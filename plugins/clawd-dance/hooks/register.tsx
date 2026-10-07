@@ -36,6 +36,7 @@ type Settings = {
   nightNudgeMs: number
   nightSound: NightSoundMode
   questionSound: SoundMode
+  permissionSound: SoundMode
   barStyle: BarStyle
 }
 
@@ -53,6 +54,7 @@ function readSettings(options: PluginOptions): Settings {
     nightNudgeMs: num('night_nudge_minutes', 0) * 60_000,
     nightSound: NIGHT_SOUND_MODES.find(mode => mode === options.night_sound) ?? '眠そうな音とひとこと',
     questionSound: SOUND_MODES.find(mode => mode === options.question_sound) ?? '効果音と声',
+    permissionSound: SOUND_MODES.find(mode => mode === options.permission_sound) ?? '効果音と声',
     barStyle: BAR_STYLES.find(style => style === options.bar_style) ?? 'グラフィカル',
   }
 }
@@ -410,6 +412,33 @@ export function questionLine(previous: unknown, random: number): string {
   return choices[Math.floor(random * choices.length) % choices.length] ?? QUESTION_LINES[0]
 }
 
+// 許可のダイアログ（道具を使ってよいか、アプリを操作してよいか、計画を進めてよいか）が出たときの声かけ。
+// ふつうの許可は classic.PermissionRequest（来なければ Notification の permission_prompt）で知る。
+// コンピューター操作のアプリの許可などは、道具が自分でダイアログを出すので、呼ばれた時点で知らせる。
+const DIALOG_TOOLS = [
+  'mcp__computer-use__request_access',
+  'mcp__computer-use__request_full_control',
+  'mcp__computer-use__request_teach_access',
+  'mcp__ccd_directory__request_directory',
+]
+const PERMISSION_LINES: { match: (tool: string) => boolean; lines: string[] }[] = [
+  { match: tool => tool.startsWith('mcp__computer-use__'), lines: ['使いたいアプリがあるよ。見てくれる？', 'アプリを使ってもいいか、聞きたいことがあるよ'] },
+  { match: tool => tool === 'mcp__ccd_directory__request_directory', lines: ['見たいフォルダがあるよ。見てくれる？'] },
+  { match: tool => tool === 'ExitPlanMode', lines: ['計画ができたよ。見てくれる？'] },
+  { match: () => true, lines: ['使っていいか、確認したいことがあるよ', '許可がほしいことがあるよ。見てくれる？', 'ひとつ確認させてね'] },
+]
+const NIGHT_PERMISSION_LINE = '夜遅くにごめんね。ひとつ確認させてね'
+
+export function isDialogTool(tool: string): boolean {
+  return DIALOG_TOOLS.includes(tool)
+}
+
+export function permissionLine(tool: string, previous: unknown, random: number): string {
+  const { lines } = PERMISSION_LINES.find(group => group.match(tool)) ?? PERMISSION_LINES[PERMISSION_LINES.length - 1]
+  const choices = lines.length > 1 ? lines.filter(line => line !== previous) : lines
+  return choices[Math.floor(random * choices.length) % choices.length] ?? lines[0]
+}
+
 function tokens(n: number): string {
   return n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : `${Math.round(n / 1000)}k`
 }
@@ -461,6 +490,9 @@ type BandState = {
   // 別の mod が送ったプロンプトのターン（idle-compact の /compact など）。放置中に動くので声を出さない
   isPluginTurn: boolean
   nextIsPlugin: boolean
+  // 許可のダイアログで返事を待っている道具。その呼び出しが終わるまで手を挙げて待つ
+  awaitingTool: string | undefined
+  lastPermissionLine: string | undefined
 }
 
 // ---- 裏の作業（バックグラウンドのタスク） ----
@@ -548,7 +580,7 @@ async function computeView($: EngineInterface, state: BandState, isWorking: bool
   let sweat = 0
   if (isWorking) {
     const latestTool = [...state.runningTools.values()].at(-1)
-    pose = latestTool === undefined ? 'dance' : poseForTool(latestTool)
+    pose = state.awaitingTool !== undefined ? 'ask' : latestTool === undefined ? 'dance' : poseForTool(latestTool)
     const elapsed = state.isInTurn ? now - state.turnStartedAt : 0
     sweat = SWEAT_MS.filter(ms => elapsed >= ms).length
   } else if (now < state.banzaiUntil) {
@@ -623,6 +655,16 @@ async function computeView($: EngineInterface, state: BandState, isWorking: bool
   return { now, pose, sweat, contextPercent, contextLine, rateLines, meters, nudgeText, bgText, signature }
 }
 
+// 許可のダイアログで待っていることを知らせる。同じ待ちで二度は鳴らさない
+async function announcePermission($: EngineInterface, state: BandState, clips: Clips, tool: string) {
+  if (state.awaitingTool !== undefined) return
+  state.awaitingTool = tool
+  await redrawIfChanged($, state)
+  state.lastPermissionLine = permissionLine(tool, state.lastPermissionLine, Math.random())
+  // 鳴り終わるのを待たない（ダイアログをすぐ出すため）
+  playCue($, state, clips, state.settings.permissionSound, state.lastPermissionLine, () => NIGHT_PERMISSION_LINE).catch(() => undefined)
+}
+
 // 帯の描き直しは、見た目が変わるときだけにする。描き直すたびに絵がわずかにちらつくため。
 async function redrawIfChanged($: EngineInterface, state: BandState) {
   const view = await computeView($, state, state.isInTurn || state.runningTools.size > 0)
@@ -658,6 +700,8 @@ export const register: Register = (on, options) => {
     nextIsNotification: false,
     isPluginTurn: false,
     nextIsPlugin: false,
+    awaitingTool: undefined,
+    lastPermissionLine: undefined,
   }
   let lastQuestionLine: string | undefined
   let shownPose: Pose | null = null
@@ -737,16 +781,34 @@ export const register: Register = (on, options) => {
     state.runningTools.set(id, e.tool)
     await redrawIfChanged($, state)
     if (e.tool === 'AskUserQuestion' && !e.agentId) {
+      // 質問のダイアログの間に許可の通知が来ても、重ねて鳴らさない
+      state.awaitingTool ??= e.tool
       lastQuestionLine = questionLine(lastQuestionLine, Math.random())
       // 鳴り終わるのを待たない（ダイアログをすぐ出すため）
       playCue($, state, clips, settings.questionSound, lastQuestionLine, () => NIGHT_QUESTION_LINE).catch(() => undefined)
+    } else if (isDialogTool(e.tool)) {
+      await announcePermission($, state, clips, e.tool)
     }
     try {
       return await next(e)
     } finally {
       state.runningTools.delete(id)
+      // 返事をもらった（許可でも拒否でも、その呼び出しが終わった）ら、手を下ろす
+      if (state.awaitingTool === e.tool || state.awaitingTool === '') state.awaitingTool = undefined
       await redrawIfChanged($, state)
     }
+  })
+
+  // ふつうの許可のダイアログ（Bash などを使ってよいか、計画を進めてよいか）。サブエージェントの頼みでも、答えるのは人なので知らせる
+  on('classic.PermissionRequest', async ($, e, next) => {
+    if (e.tool_name !== 'AskUserQuestion') await announcePermission($, state, clips, e.tool_name)
+    return next(e)
+  })
+
+  // PermissionRequest が届かない場合の備え。どの道具かはわからないので、ふつうの言葉で知らせる
+  on('classic.Notification', async ($, e, next) => {
+    if (e.notification_type === 'permission_prompt') await announcePermission($, state, clips, '')
+    return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
@@ -757,6 +819,7 @@ export const register: Register = (on, options) => {
 
     state.isInTurn = false
     state.runningTools.clear()
+    state.awaitingTool = undefined
     state.lastDoneAt = await $.clock.now()
     resetTimers()
     // Stop（裏の作業の一覧）が届くのを少し待ってから、バンザイと音を決める
