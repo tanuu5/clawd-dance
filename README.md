@@ -28,7 +28,7 @@ Claude が考えているあいだ、ただ待つのは少しさみしい。そ�
 <img src="docs/screenshots/night.png" width="800" alt="夜 1 時台の帯。バンザイする Clawd の右に「1時を過ぎたよ。目、疲れてない？」と一言が出て、右側には使用量と 7 日枠の目安が並ぶ"><br>
 <sub>夜ふかしの声かけ。0〜4 時台にメッセージを送ると、Clawd の横に一言が出ます。</sub>
 
-<img src="docs/screenshots/recap.jpg" width="800" alt="バンザイする Clawd の横に「前回までのあらすじ！」と閉じるボタンが出て、帯の下に 3 行のあらすじと「次は：もう一度押して見た目確認後、コミット・push」が並ぶ"><br>
+<img src="docs/screenshots/recap.jpg" width="800" alt="Clawd の横に「前回までのあらすじ！」と閉じるボタンが出て、帯の下に 3 行のあらすじと「次は：表示を確認して、記事の空欄を埋めてください」が並び、その右に小さく Haiku 5.5 と出る"><br>
 <sub>前回までのあらすじ。Clawd にマウスを乗せて「📖 あらすじ」を押すと、Haiku がこのセッションの会話をまとめます。</sub>
 
 <p align="center">
