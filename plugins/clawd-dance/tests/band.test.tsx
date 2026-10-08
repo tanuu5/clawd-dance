@@ -374,6 +374,7 @@ describe('前回までのあらすじ', () => {
     expect(many).toEqual(['a', 'b', 'c', 'd', '▶ 次は：g'])
     expect(recapLines('一文目。二文目。三文目。\n▶ 次は：試す。')).toEqual(['一文目。', '二文目。', '三文目。', '▶ 次は：試す。'])
     expect(recapLines('一。二。三。四。五。六。')).toEqual(['一。', '二。', '三。', '四。'])
+    expect(recapLines('前回までのあらすじ！Clawd に技が。\n▶ 次は：試す')).toEqual(['Clawd に技が。', '▶ 次は：試す'])
   })
 
   test('ボタンを押すと Haiku に会話を渡し、あらすじを帯に出す。閉じると消える', async ($, on) => {
@@ -387,13 +388,32 @@ describe('前回までのあらすじ', () => {
     const ui = await $.ui.mount({ plugin: 'clawd-dance', surface: 'desktop', component: 'AbovePrompt', props: bandProps(false) })
     await ui.press({ key: 'recap' })
     await new Promise(resolve => setTimeout(resolve, 50))
-    expect(asked[0]?.model).toBe('haiku')
+    expect(asked[0]?.model).toBe('claude-haiku-5-5')
+    expect(await ui.find({ type: 'Text', text: 'Haiku 5.5' })).toBeDefined()
     expect(asked[0]?.prompt).toContain('あなた：あらすじ機能を作って')
     expect(await ui.find({ type: 'Text', text: /前回までのあらすじ/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: 'Clawd に新しい技が！' })).toBeDefined()
     await ui.press({ key: 'recap-close' })
     await new Promise(resolve => setTimeout(resolve, 50))
     expect(await ui.find({ type: 'Text', text: /前回までのあらすじ/ })).toBeUndefined()
+    await ui.unmount()
+  })
+  test('Haiku 5.5 が無いと言われたら、別名の haiku で頼み直す', async ($, on) => {
+    engine(on)
+    const asked: string[] = []
+    on('session.messages', () => ({ value: [user('あらすじ機能を作って')] }) as never)
+    on('model.complete', (_$, e) => {
+      asked.push(e.model)
+      return e.model === 'claude-haiku-5-5'
+        ? ({ value: { isAnswered: false, reason: 'api-error', status: 404, error: 'not_found_error', usage: {} } } as never)
+        : ({ value: { isAnswered: true, text: 'ひとこと。\n▶ 次は：続き', usage: {} } } as never)
+    })
+    const ui = await $.ui.mount({ plugin: 'clawd-dance', surface: 'desktop', component: 'AbovePrompt', props: bandProps(false) })
+    await ui.press({ key: 'recap' })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(asked).toEqual(['claude-haiku-5-5', 'haiku'])
+    expect(await ui.find({ type: 'Text', text: 'Haiku' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'ひとこと。' })).toBeDefined()
     await ui.unmount()
   })
 })

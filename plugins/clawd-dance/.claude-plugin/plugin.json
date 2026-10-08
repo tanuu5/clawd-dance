@@ -1,6 +1,6 @@
 {
   "name": "clawd-dance",
-  "version": "0.18.0",
+  "version": "0.18.1",
   "description": "入力欄の上の帯で、作業に合わせて Clawd（二次創作版）が踊り、使用量も表示する",
   "author": {
     "name": "たぬ"

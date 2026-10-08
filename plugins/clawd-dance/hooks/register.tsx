@@ -444,7 +444,12 @@ export function permissionLine(tool: string, previous: unknown, random: number):
 // 「前回までのあらすじ」を数行で作ってもらい、帯の Clawd の横に出す。次にメッセージを送るか「閉じる」で消える。
 // 渡すのは人の発言と Claude の返答の文だけ（道具の結果は長いので、道具の名前と対象のファイル名だけにする）。
 
-const RECAP_MODEL = 'haiku'
+// 頼むモデル。新しい Haiku 5.5 を ID で指定する（同梱の Claude Code 2.1.289 は 5.5 を知らず、
+// 「haiku」の別名だと Haiku 4.5 になる）。5.5 を断られたら（使えない環境、古い版）別名に戻す
+const RECAP_MODELS = [
+  { model: 'claude-haiku-5-5', label: 'Haiku 5.5' },
+  { model: 'haiku', label: 'Haiku' },
+]
 // Haiku に渡す会話の長さの上限（文字数）。新しいほうから詰め、入りきらない古いところは捨てる
 const RECAP_BUDGET = 40_000
 const RECAP_TIMEOUT_MS = 60_000
@@ -512,15 +517,39 @@ const RECAP_MAX_LINES = 4
 export function recapLines(text: string): string[] {
   const lines = text
     .split('\n')
-    .map(line => line.replace(/^\s*(?:#+|[-*・]|\d+[.)、])\s*/, '').replace(/\*\*/g, '').trim())
-    .filter(line => line !== '' && !/^前回までのあらすじ[！!]?$/.test(line))
+    .map(line =>
+      line
+        .replace(/^\s*(?:#+|[-*・]|\d+[.)、])\s*/, '')
+        .replace(/\*\*/g, '')
+        // 見出しは帯に出しているので、本文の頭に付いてきたら落とす
+        .replace(/^前回までのあらすじ[！!]?\s*/, '')
+        .trim(),
+    )
+    .filter(line => line !== '')
     .flatMap(line => (line.startsWith('▶') ? [line] : sentenceLines(line)))
   const next = lines.findLast(line => line.startsWith('▶'))
   const story = lines.filter(line => line !== next).slice(0, RECAP_MAX_LINES)
   return next === undefined ? story : [...story, next]
 }
 
-type Recap = { status: 'loading' } | { status: 'done'; lines: string[] } | { status: 'error'; message: string }
+type Recap = { status: 'loading' } | { status: 'done'; lines: string[]; model: string } | { status: 'error'; message: string }
+
+// 順に頼み、送る前に断られた（例外）か、モデルが無いという API エラー（400・404）なら次のモデルへ
+async function completeRecap($: EngineInterface, prompt: string) {
+  let lastError: unknown
+  for (const [i, { model, label }] of RECAP_MODELS.entries()) {
+    const isLast = i === RECAP_MODELS.length - 1
+    try {
+      const reply = await $.model.complete({ model, system: RECAP_SYSTEM, prompt, maxTokens: 800, timeoutMs: RECAP_TIMEOUT_MS })
+      if (!reply.isAnswered && reply.reason === 'api-error' && (reply.status === 400 || reply.status === 404) && !isLast) continue
+      return { reply, label }
+    } catch (error) {
+      lastError = error
+      if (isLast) throw error
+    }
+  }
+  throw lastError
+}
 
 // ボタンが押されたとき。作っている間は Clawd がきょろきょろし、できたらバンザイする
 async function startRecap($: EngineInterface, state: BandState) {
@@ -535,16 +564,10 @@ async function startRecap($: EngineInterface, state: BandState) {
     if (transcript === '') {
       recap = { status: 'error', message: 'まだあらすじにする会話がないよ' }
     } else {
-      const reply = await $.model.complete({
-        model: RECAP_MODEL,
-        system: RECAP_SYSTEM,
-        prompt: `<記録>\n${transcript}\n</記録>\n\n前回までのあらすじをお願いします。`,
-        maxTokens: 800,
-        timeoutMs: RECAP_TIMEOUT_MS,
-      })
+      const { reply, label } = await completeRecap($, `<記録>\n${transcript}\n</記録>\n\n前回までのあらすじをお願いします。`)
       if (reply.isAnswered) {
         const lines = recapLines(reply.text)
-        recap = lines.length > 0 ? { status: 'done', lines } : { status: 'error', message: 'うまくまとめられなかった…' }
+        recap = lines.length > 0 ? { status: 'done', lines, model: label } : { status: 'error', message: 'うまくまとめられなかった…' }
       } else {
         const why = reply.reason === 'api-error' ? `API エラー${reply.status === null ? '' : ` ${reply.status}`}` : reply.reason === 'aborted' ? '時間切れ' : '返事が空だった'
         recap = { status: 'error', message: `あらすじを作れなかった（${why}）` }
@@ -1101,9 +1124,17 @@ export const register: Register = (on, options) => {
         {/* あらすじの本文は帯の下に横幅いっぱいで出す（Clawd と使用量の間の狭い欄だと、1 文が何行にも折り返した） */}
         {recap?.status === 'done' ? (
           <Box key="recap-body" flexDirection="column" marginTop={1}>
-            {recap.lines.map((line, i) => (
-              <Text key={`recap-${i}`}>{line}</Text>
-            ))}
+            {/* どのモデルが書いたかは、最後の行（「次は」）の右に小さく出す（見出しの横だと狭い欄で折り返した） */}
+            {recap.lines.map((line, i) =>
+              i === recap.lines.length - 1 ? (
+                <Box key={`recap-${i}`} flexDirection="row" gap={2}>
+                  <Text>{line}</Text>
+                  <Text dimColor>{recap.model}</Text>
+                </Box>
+              ) : (
+                <Text key={`recap-${i}`}>{line}</Text>
+              ),
+            )}
           </Box>
         ) : null}
       </Box>
