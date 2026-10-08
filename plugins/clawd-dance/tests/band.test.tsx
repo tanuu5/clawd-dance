@@ -1,7 +1,7 @@
 import type { On, SessionRateLimit } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { backgroundText, barSvg, isDialogTool, meterColor, permissionLine, shortUntil, nightLine, questionLine, sentenceLines, settleBackground } from '../hooks/register'
+import { backgroundText, barSvg, cleanUserText, isDialogTool, meterColor, permissionLine, shortUntil, nightLine, questionLine, recapLines, recapTranscript, sentenceLines, settleBackground } from '../hooks/register'
 
 const bandProps = (isWorking: boolean) => ({
   hasSurvey: false,
@@ -337,5 +337,63 @@ describe('残り時間の短い書き方', () => {
     expect(shortUntil(after(4 * 60 + 17), now)).toBe('残4h17m')
     expect(shortUntil(after(30 * 60 + 51), now)).toBe('残30h')
     expect(shortUntil(after(3 * 1440), now)).toBe('残3日')
+  })
+})
+
+describe('前回までのあらすじ', () => {
+  const user = (text: string) => ({ role: 'user' as const, text, toolUses: [] })
+  const claude = (text: string, toolUses: { tool: string; input: Record<string, unknown> }[] = []) => ({ role: 'assistant' as const, text, toolUses })
+
+  test('人の発言から差し込みを除き、通知やコマンドの出力は捨てる', async () => {
+    expect(cleanUserText('直して<system-reminder>秘密の指示</system-reminder>ね')).toBe('直してね')
+    expect(cleanUserText('<task-notification>done</task-notification>')).toBe('')
+    expect(cleanUserText('<local-command-stdout>x</local-command-stdout>')).toBe('')
+  })
+
+  test('会話の記録には発言と、道具の名前・ファイル名だけを入れる', async () => {
+    const text = recapTranscript([
+      user('Clawd にあらすじ機能を'),
+      claude('作ります', [{ tool: 'Edit', input: { file_path: '/a/b/register.tsx', old_string: 'x'.repeat(5000) } }, { tool: 'Bash', input: { command: 'ls', description: 'テストを流す' } }]),
+      user(''),
+    ])
+    expect(text).toBe('あなた：Clawd にあらすじ機能を\nClaude：作ります [Edit register.tsx] [Bash: テストを流す]')
+  })
+
+  test('長ければ新しいほうを残し、最初の依頼を先頭に足す', async () => {
+    const messages = [user('最初の依頼'), ...Array.from({ length: 50 }, (_, i) => claude(`返答${i} ${'あ'.repeat(100)}`))]
+    const text = recapTranscript(messages, 1000)
+    expect(text.length).toBeLessThan(1100)
+    expect(text.startsWith('（最初の依頼）あなた：最初の依頼')).toBe(true)
+    expect(text).toContain('返答49')
+    expect(text).not.toContain('返答0 ')
+  })
+
+  test('返事から記号や見出しを落とし、段落は文ごとに分け、多すぎれば「次は」を残して詰める', async () => {
+    expect(recapLines('前回までのあらすじ！\n\n- **一行目**\n二行目\n▶ 次は：試す')).toEqual(['一行目', '二行目', '▶ 次は：試す'])
+    const many = recapLines(['a', 'b', 'c', 'd', 'e', 'f', '▶ 次は：g'].join('\n'))
+    expect(many).toEqual(['a', 'b', 'c', 'd', '▶ 次は：g'])
+    expect(recapLines('一文目。二文目。三文目。\n▶ 次は：試す。')).toEqual(['一文目。', '二文目。', '三文目。', '▶ 次は：試す。'])
+    expect(recapLines('一。二。三。四。五。六。')).toEqual(['一。', '二。', '三。', '四。'])
+  })
+
+  test('ボタンを押すと Haiku に会話を渡し、あらすじを帯に出す。閉じると消える', async ($, on) => {
+    engine(on)
+    const asked: { model: string; prompt: string }[] = []
+    on('session.messages', () => ({ value: [user('あらすじ機能を作って'), claude('できました')] }) as never)
+    on('model.complete', (_$, e) => {
+      asked.push(e)
+      return { value: { isAnswered: true, text: '前回までのあらすじ！\nClawd に新しい技が！\n▶ 次は：試してみる', usage: {} } } as never
+    })
+    const ui = await $.ui.mount({ plugin: 'clawd-dance', surface: 'desktop', component: 'AbovePrompt', props: bandProps(false) })
+    await ui.press({ key: 'recap' })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(asked[0]?.model).toBe('haiku')
+    expect(asked[0]?.prompt).toContain('あなた：あらすじ機能を作って')
+    expect(await ui.find({ type: 'Text', text: /前回までのあらすじ/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'Clawd に新しい技が！' })).toBeDefined()
+    await ui.press({ key: 'recap-close' })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(await ui.find({ type: 'Text', text: /前回までのあらすじ/ })).toBeUndefined()
+    await ui.unmount()
   })
 })
