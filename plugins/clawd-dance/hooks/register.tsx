@@ -1,4 +1,4 @@
-import { autumnIntroSvg, INTRO_MS, INTRO_WIDTH, seasonFor } from './season'
+import { introAlt, introSvg, INTRO_MS, INTRO_REDRAW_MS, INTRO_WIDTH, type Season, seasonFor } from './season'
 import { chimeWavBase64, sleepyChimeWavBase64 } from './sounds'
 import type { AudioClip, EngineInterface, PluginOptions, Register } from 'claude-code'
 
@@ -378,11 +378,11 @@ async function maybeNudge($: EngineInterface, state: BandState): Promise<boolean
 }
 
 // ---- 季節の登場 ----
-// セッションで最初にメッセージを送ったとき、季節の Clawd（秋は焚き火で焼き芋）で登場し、
-// 風がサーっと吹いて、いつもの Clawd に戻る（絵と流れは season.ts）。
+// セッションで最初にメッセージを送ったとき、季節の Clawd（春は桜とお団子、夏はうちわとスイカ、秋は焚き火で焼き芋、
+// 冬はこたつでみかん）で登場し、季節のものがサーっと吹き抜けて、いつもの Clawd に戻る（絵と流れは season.ts）。
 // 「最初」は、このセッションで人が送ったプロンプトが 1 つ目のとき（mod を読み直しても、再開したセッションでも出ない）。
 
-type Intro = { id: string; startedAt: number; until: number }
+type Intro = { id: string; season: Season; startedAt: number; until: number }
 
 // メッセージが送られたとき：最初のメッセージで、季節の絵があれば state.intro に置く。出したら true
 async function maybeIntro($: EngineInterface, state: BandState): Promise<boolean> {
@@ -391,8 +391,8 @@ async function maybeIntro($: EngineInterface, state: BandState): Promise<boolean
   if ((await $.session.turns()) > 1) return false
   const now = await $.clock.now()
   const date = await localDate($, state, now)
-  if (date === undefined || seasonFor(date.getUTCMonth() + 1) === undefined) return false
-  state.intro = { id: `intro-${now}`, startedAt: now, until: now + INTRO_MS }
+  if (date === undefined) return false
+  state.intro = { id: `intro-${now}`, season: seasonFor(date.getUTCMonth() + 1), startedAt: now, until: now + INTRO_MS }
   return true
 }
 
@@ -966,7 +966,13 @@ export const register: Register = (on, options) => {
       }
       try {
         if (await maybeIntro($, state)) {
-          $.clock.after(INTRO_MS + 50, () => void redrawIfChanged($, state))
+          // 登場の間は短い間隔で描き直す。アプリは mod が描き直さなくても、最後に渡した絵を読み込み直すことがあり、
+          // そのとき絵に書き込んだ経過時間が古いと、流れが巻き戻る（終わった場面がまた出る、吹き抜ける前に終わる）
+          const redraw = $.clock.every(INTRO_REDRAW_MS, () => $.ui.invalidate('ui.render'))
+          $.clock.after(INTRO_MS + 50, () => {
+            redraw.cancel()
+            void redrawIfChanged($, state)
+          })
           await redrawIfChanged($, state)
         }
       } catch {
@@ -1076,10 +1082,10 @@ export const register: Register = (on, options) => {
                 <Svg source={variant.source} alt={POSE_ALT[variant.pose]} width={68} height={52} />
               </Box>
             ))}
-            {/* 季節の登場。終わったら外す（絵の幅は焚き火のぶん広い）。描き直しで読み込み直されても続きから動くよう、経過時間を渡す */}
+            {/* 季節の登場。終わったら外す（絵の幅は景色のぶん広い）。描き直しで読み込み直されても続きから動くよう、経過時間を渡す */}
             {intro === undefined ? null : (
               <Box key={intro.id}>
-                <Svg source={autumnIntroSvg(intro.id, (now - intro.startedAt) / 1000)} alt="焚き火で焼き芋を焼く Clawd" width={INTRO_WIDTH} height={52} />
+                <Svg source={introSvg(intro.season, intro.id, (now - intro.startedAt) / 1000)} alt={introAlt(intro.season)} width={INTRO_WIDTH} height={52} />
               </Box>
             )}
             {/* ポインタを乗せたときだけ出るボタン（key を付けると別の範囲になって出なくなるので付けない） */}

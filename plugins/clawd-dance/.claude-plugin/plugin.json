@@ -1,6 +1,6 @@
 {
   "name": "clawd-dance",
-  "version": "0.19.0",
+  "version": "0.20.0",
   "description": "入力欄の上の帯で、作業に合わせて Clawd（二次創作版）が踊り、使用量も表示する",
   "author": {
     "name": "たぬ"
@@ -116,7 +116,7 @@
     "seasonal_intro": {
       "type": "boolean",
       "title": "季節の登場",
-      "description": "セッションで最初にメッセージを送ったとき、季節の Clawd で登場し、風がサーっと吹いていつもの Clawd に戻る（いまは秋＝9〜11月の、焚き火で焼き芋だけ）",
+      "description": "セッションで最初にメッセージを送ったとき、季節の Clawd で登場し、季節のものがサーっと吹き抜けていつもの Clawd に戻る（春は桜とお団子、夏はうちわとスイカ、秋は焚き火で焼き芋、冬はこたつでみかん）",
       "default": true
     }
   }

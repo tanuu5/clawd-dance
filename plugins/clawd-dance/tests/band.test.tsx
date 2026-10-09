@@ -2,7 +2,7 @@ import type { On, SessionRateLimit } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { backgroundText, barSvg, cleanUserText, isDialogTool, meterColor, permissionLine, shortUntil, nightLine, questionLine, recapLines, recapTranscript, sentenceLines, settleBackground } from '../hooks/register'
-import { autumnIntroSvg, INTRO_MS, seasonFor } from '../hooks/season'
+import { introSvg, INTRO_MS, type Season, seasonFor } from '../hooks/season'
 
 const bandProps = (isWorking: boolean) => ({
   hasSurvey: false,
@@ -420,23 +420,22 @@ describe('前回までのあらすじ', () => {
 })
 
 describe('季節の登場', () => {
-  test('秋（9〜11 月）だけ', async () => {
-    expect(seasonFor(9)).toBe('autumn')
-    expect(seasonFor(11)).toBe('autumn')
-    expect(seasonFor(8)).toBeUndefined()
-    expect(seasonFor(12)).toBeUndefined()
+  test('春 3〜5 月、夏 6〜8 月、秋 9〜11 月、冬 12〜2 月', async () => {
+    expect([1, 2, 3, 5, 6, 8, 9, 11, 12].map(seasonFor)).toEqual(['winter', 'winter', 'spring', 'spring', 'summer', 'summer', 'autumn', 'autumn', 'winter'])
   })
 
-  test('絵は登場ごとに id が違い、Svg の上限に収まる', async () => {
-    const svg = autumnIntroSvg('intro-1')
-    expect(svg.startsWith('<svg id="intro-1"')).toBe(true)
-    expect(autumnIntroSvg('intro-2')).not.toBe(svg)
-    expect(svg.length).toBeLessThan(131_072)
+  test('絵は登場ごとに id が違い、どの季節も Svg の上限に収まる', async () => {
+    for (const season of ['spring', 'summer', 'autumn', 'winter'] as Season[]) {
+      const svg = introSvg(season, 'intro-1')
+      expect(svg.startsWith('<svg id="intro-1"')).toBe(true)
+      expect(introSvg(season, 'intro-2')).not.toBe(svg)
+      expect(svg.length).toBeLessThan(131_072)
+    }
   })
 
   test('読み込み直されても続きから動くよう、経過時間だけ開始を前にずらす', async () => {
-    expect(autumnIntroSvg('intro-1')).toContain('animation-delay: 0.00s;')
-    const later = autumnIntroSvg('intro-1', 4)
+    expect(introSvg('autumn', 'intro-1')).toContain('animation-delay: 0.00s;')
+    const later = introSvg('autumn', 'intro-1', 4)
     expect(later).toContain('animation-delay: -4.00s;')
     // 風の落ち葉（5.55 秒から）は、4 秒たっていれば 1.55 秒後に飛ぶ
     expect(later).toContain('cubic-bezier(.45,0,.7,1) 1.55s both')
@@ -472,6 +471,17 @@ describe('季節の登場', () => {
     await ui.unmount()
   })
 
+  test('登場の間は短い間隔で描き直し、絵に経過時間を書き込む（繰り返しの動きも続きから）', async ($, on) => {
+    const clock = setup(on, '2026-10-09T03:00:00Z', 1)
+    const ui = await $.ui.mount({ plugin: 'clawd-dance', surface: 'desktop', component: 'AbovePrompt', props: bandProps(true) })
+    await start($, 'おはよう')
+    await clock.advance(3_000)
+    const intro = (await ui.findAll({ type: 'Svg' })).find(svg => svg.props.alt === '焚き火で焼き芋を焼く Clawd')
+    expect(String(intro?.props.source)).toContain('animation-delay: -3.00s;')
+    expect(String(intro?.props.source)).toContain('animation: fA 0.36s steps(1) -3.00s infinite;')
+    await ui.unmount()
+  })
+
   test('2 つ目からのメッセージ（再開したセッション、読み直した mod）では出ない', async ($, on) => {
     setup(on, '2026-10-09T03:00:00Z', 2)
     const ui = await $.ui.mount({ plugin: 'clawd-dance', surface: 'desktop', component: 'AbovePrompt', props: bandProps(true) })
@@ -481,14 +491,20 @@ describe('季節の登場', () => {
     await ui.unmount()
   })
 
-  test('秋でない月は出ない', async ($, on) => {
-    setup(on, '2026-12-09T03:00:00Z', 1)
-    const ui = await $.ui.mount({ plugin: 'clawd-dance', surface: 'desktop', component: 'AbovePrompt', props: bandProps(true) })
-    await start($, 'おはよう')
-    await ui.redraw()
-    expect(await shownAlts(ui)).not.toContain('焚き火で焼き芋を焼く Clawd')
-    await ui.unmount()
-  })
+  for (const [now, alt] of [
+    ['2026-12-09T03:00:00Z', 'こたつでみかんを食べる Clawd'],
+    ['2027-04-09T03:00:00Z', '桜の下でお団子を食べる Clawd'],
+    ['2027-07-09T03:00:00Z', 'うちわであおいでスイカを食べる Clawd'],
+  ]) {
+    test(`${Number(now.slice(5, 7))} 月は「${alt}」で登場する`, async ($, on) => {
+      setup(on, now, 1)
+      const ui = await $.ui.mount({ plugin: 'clawd-dance', surface: 'desktop', component: 'AbovePrompt', props: bandProps(true) })
+      await start($, 'おはよう')
+      await ui.redraw()
+      expect(await shownAlts(ui)).toContain(alt)
+      await ui.unmount()
+    })
+  }
 
   test('設定でオフにすると出ない', { options: { seasonal_intro: false } }, async ($, on) => {
     setup(on, '2026-10-09T03:00:00Z', 1)
