@@ -2,6 +2,7 @@ import type { On, SessionRateLimit } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { backgroundText, barSvg, cleanUserText, isDialogTool, meterColor, permissionLine, shortUntil, nightLine, questionLine, recapLines, recapTranscript, sentenceLines, settleBackground } from '../hooks/register'
+import { autumnIntroSvg, INTRO_MS, seasonFor } from '../hooks/season'
 
 const bandProps = (isWorking: boolean) => ({
   hasSurvey: false,
@@ -414,6 +415,87 @@ describe('前回までのあらすじ', () => {
     expect(asked).toEqual(['claude-haiku-5-5', 'haiku'])
     expect(await ui.find({ type: 'Text', text: 'Haiku' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: 'ひとこと。' })).toBeDefined()
+    await ui.unmount()
+  })
+})
+
+describe('季節の登場', () => {
+  test('秋（9〜11 月）だけ', async () => {
+    expect(seasonFor(9)).toBe('autumn')
+    expect(seasonFor(11)).toBe('autumn')
+    expect(seasonFor(8)).toBeUndefined()
+    expect(seasonFor(12)).toBeUndefined()
+  })
+
+  test('絵は登場ごとに id が違い、Svg の上限に収まる', async () => {
+    const svg = autumnIntroSvg('intro-1')
+    expect(svg.startsWith('<svg id="intro-1"')).toBe(true)
+    expect(autumnIntroSvg('intro-2')).not.toBe(svg)
+    expect(svg.length).toBeLessThan(131_072)
+  })
+
+  test('読み込み直されても続きから動くよう、経過時間だけ開始を前にずらす', async () => {
+    expect(autumnIntroSvg('intro-1')).toContain('animation-delay: 0.00s;')
+    const later = autumnIntroSvg('intro-1', 4)
+    expect(later).toContain('animation-delay: -4.00s;')
+    // 風の落ち葉（5.55 秒から）は、4 秒たっていれば 1.55 秒後に飛ぶ
+    expect(later).toContain('cubic-bezier(.45,0,.7,1) 1.55s both')
+  })
+
+  const setup = (on: On, now: string, turns: number) => {
+    on('session.usage', () => ({ value: { startedAt: 0, context: { tokens: 1, window: 1_000_000, percent: 0 }, rateLimits: [] } }))
+    const clock = mock.clock(on, { now: Date.parse(now) })
+    on('session.turns', () => ({ value: turns }))
+    on('process.run', () => ({ value: { stdout: '+0900\n', stderr: '', exitCode: 0 } }))
+    on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+    on('ui.render', ($, e) => {
+      const { Box } = $.ui.resolve(e)
+      return <Box key="engine" />
+    })
+    return clock
+  }
+  const start = ($: unknown, text: string) => ($ as { turn: { start: Function } }).turn.start({ text, turnId: text })
+  const shownAlts = async (ui: { findAll: (q: { type: string }) => Promise<{ props: Record<string, unknown> }[]> }) =>
+    (await ui.findAll({ type: 'Svg' })).map(svg => svg.props.alt)
+
+  test('最初のメッセージで焼き芋の絵で登場し、しばらくするといつもの絵に戻る', async ($, on) => {
+    // 10 月 9 日 12:00（日本時間）
+    const clock = setup(on, '2026-10-09T03:00:00Z', 1)
+    const ui = await $.ui.mount({ plugin: 'clawd-dance', surface: 'desktop', component: 'AbovePrompt', props: bandProps(true) })
+    expect(await shownAlts(ui)).not.toContain('焚き火で焼き芋を焼く Clawd')
+    await start($, 'おはよう')
+    await ui.redraw()
+    expect(await shownAlts(ui)).toContain('焚き火で焼き芋を焼く Clawd')
+    await clock.advance(INTRO_MS + 100)
+    await ui.redraw()
+    expect(await shownAlts(ui)).not.toContain('焚き火で焼き芋を焼く Clawd')
+    await ui.unmount()
+  })
+
+  test('2 つ目からのメッセージ（再開したセッション、読み直した mod）では出ない', async ($, on) => {
+    setup(on, '2026-10-09T03:00:00Z', 2)
+    const ui = await $.ui.mount({ plugin: 'clawd-dance', surface: 'desktop', component: 'AbovePrompt', props: bandProps(true) })
+    await start($, 'つづき')
+    await ui.redraw()
+    expect(await shownAlts(ui)).not.toContain('焚き火で焼き芋を焼く Clawd')
+    await ui.unmount()
+  })
+
+  test('秋でない月は出ない', async ($, on) => {
+    setup(on, '2026-12-09T03:00:00Z', 1)
+    const ui = await $.ui.mount({ plugin: 'clawd-dance', surface: 'desktop', component: 'AbovePrompt', props: bandProps(true) })
+    await start($, 'おはよう')
+    await ui.redraw()
+    expect(await shownAlts(ui)).not.toContain('焚き火で焼き芋を焼く Clawd')
+    await ui.unmount()
+  })
+
+  test('設定でオフにすると出ない', { options: { seasonal_intro: false } }, async ($, on) => {
+    setup(on, '2026-10-09T03:00:00Z', 1)
+    const ui = await $.ui.mount({ plugin: 'clawd-dance', surface: 'desktop', component: 'AbovePrompt', props: bandProps(true) })
+    await start($, 'おはよう')
+    await ui.redraw()
+    expect(await shownAlts(ui)).not.toContain('焚き火で焼き芋を焼く Clawd')
     await ui.unmount()
   })
 })

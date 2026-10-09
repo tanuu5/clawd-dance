@@ -1,3 +1,4 @@
+import { autumnIntroSvg, INTRO_MS, INTRO_WIDTH, seasonFor } from './season'
 import { chimeWavBase64, sleepyChimeWavBase64 } from './sounds'
 import type { AudioClip, EngineInterface, PluginOptions, Register } from 'claude-code'
 
@@ -38,6 +39,7 @@ type Settings = {
   questionSound: SoundMode
   permissionSound: SoundMode
   barStyle: BarStyle
+  seasonalIntro: boolean
 }
 
 function readSettings(options: PluginOptions): Settings {
@@ -56,6 +58,7 @@ function readSettings(options: PluginOptions): Settings {
     questionSound: SOUND_MODES.find(mode => mode === options.question_sound) ?? '効果音と声',
     permissionSound: SOUND_MODES.find(mode => mode === options.permission_sound) ?? '効果音と声',
     barStyle: BAR_STYLES.find(style => style === options.bar_style) ?? 'グラフィカル',
+    seasonalIntro: options.seasonal_intro !== false,
   }
 }
 
@@ -343,14 +346,19 @@ export function nightLine(hour: number, previous: unknown, random: number): stri
   return choices[Math.floor(random * choices.length) % choices.length] ?? lines[0]
 }
 
-async function localHour($: EngineInterface, state: BandState, now: number): Promise<number | undefined> {
+// 手元の日時。時差の分だけずらした Date を返すので、getUTCHours などで読む
+async function localDate($: EngineInterface, state: BandState, now: number): Promise<Date | undefined> {
   if (state.tzOffsetMin === undefined) {
     const { stdout } = await $.process.run(['/bin/date', '+%z'])
     const m = /^([+-])(\d\d)(\d\d)$/.exec(stdout.trim())
     if (!m) return undefined
     state.tzOffsetMin = (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3]))
   }
-  return new Date(now + state.tzOffsetMin * 60_000).getUTCHours()
+  return new Date(now + state.tzOffsetMin * 60_000)
+}
+
+async function localHour($: EngineInterface, state: BandState, now: number): Promise<number | undefined> {
+  return (await localDate($, state, now))?.getUTCHours()
 }
 
 // メッセージが送られたとき：時間帯と間隔が合えば一言を決めて state.nudge に置く。出したら true
@@ -366,6 +374,25 @@ async function maybeNudge($: EngineInterface, state: BandState): Promise<boolean
   await $.store.set('nightNudgeAt', now)
   await $.store.set('nightNudgeText', text)
   state.nudge = { text, until: now + NUDGE_SHOW_MS }
+  return true
+}
+
+// ---- 季節の登場 ----
+// セッションで最初にメッセージを送ったとき、季節の Clawd（秋は焚き火で焼き芋）で登場し、
+// 風がサーっと吹いて、いつもの Clawd に戻る（絵と流れは season.ts）。
+// 「最初」は、このセッションで人が送ったプロンプトが 1 つ目のとき（mod を読み直しても、再開したセッションでも出ない）。
+
+type Intro = { id: string; startedAt: number; until: number }
+
+// メッセージが送られたとき：最初のメッセージで、季節の絵があれば state.intro に置く。出したら true
+async function maybeIntro($: EngineInterface, state: BandState): Promise<boolean> {
+  if (!state.settings.seasonalIntro || state.isIntroChecked) return false
+  state.isIntroChecked = true
+  if ((await $.session.turns()) > 1) return false
+  const now = await $.clock.now()
+  const date = await localDate($, state, now)
+  if (date === undefined || seasonFor(date.getUTCMonth() + 1) === undefined) return false
+  state.intro = { id: `intro-${now}`, startedAt: now, until: now + INTRO_MS }
   return true
 }
 
@@ -652,6 +679,9 @@ type BandState = {
   // 前回までのあらすじ。recapSeq は、閉じたあとに届いた古い返事を捨てるための通し番号
   recap: Recap | undefined
   recapSeq: number
+  // 季節の登場。最初のメッセージで一度だけ確かめる
+  intro: Intro | undefined
+  isIntroChecked: boolean
 }
 
 // ---- 裏の作業（バックグラウンドのタスク） ----
@@ -813,9 +843,11 @@ async function computeView($: EngineInterface, state: BandState, isWorking: bool
   const nudgeText = state.nudge !== undefined && now < state.nudge.until ? state.nudge.text : undefined
   const bgText = backgroundText(state.background)
   const recap = state.recap
-  const signature = [pose, sweat, contextLine, ...rateLines.map(line => `${line.text}${line.pace?.text ?? ''}${line.until}`), nudgeText ?? '', bgText ?? '', JSON.stringify(recap ?? null)].join('|')
+  // 季節の登場の間は、その絵だけを出す（ポーズが変わっても描き直さない）
+  const intro = state.intro !== undefined && now < state.intro.until ? state.intro : undefined
+  const signature = [intro?.id ?? `${pose}|${sweat}`, contextLine, ...rateLines.map(line => `${line.text}${line.pace?.text ?? ''}${line.until}`), nudgeText ?? '', bgText ?? '', JSON.stringify(recap ?? null)].join('|')
 
-  return { now, pose, sweat, contextPercent, contextLine, rateLines, meters, nudgeText, bgText, recap, signature }
+  return { now, pose, sweat, intro, contextPercent, contextLine, rateLines, meters, nudgeText, bgText, recap, signature }
 }
 
 // 許可のダイアログで待っていることを知らせる。同じ待ちで二度は鳴らさない
@@ -867,6 +899,8 @@ export const register: Register = (on, options) => {
     lastPermissionLine: undefined,
     recap: undefined,
     recapSeq: 0,
+    intro: undefined,
+    isIntroChecked: false,
   }
   let lastQuestionLine: string | undefined
   let shownPose: Pose | null = null
@@ -929,6 +963,14 @@ export const register: Register = (on, options) => {
         }
       } catch {
         // 声かけに失敗しても帯とターンは止めない
+      }
+      try {
+        if (await maybeIntro($, state)) {
+          $.clock.after(INTRO_MS + 50, () => void redrawIfChanged($, state))
+          await redrawIfChanged($, state)
+        }
+      } catch {
+        // 季節の登場に失敗しても、いつもの Clawd で続ける
       }
     }
     // サブエージェントのターンでも呼ばれうるので、本体のターンの始まりだけを数える
@@ -1008,7 +1050,7 @@ export const register: Register = (on, options) => {
     const { Box, Button, Svg, Text } = $.ui.resolve(e)
     const view = await computeView($, state, e.props.isWorking)
     state.drawnSignature = view.signature
-    const { now, sweat, contextPercent, contextLine, rateLines, meters, nudgeText, bgText, recap } = view
+    const { now, sweat, intro, contextPercent, contextLine, rateLines, meters, nudgeText, bgText, recap } = view
     let pose = view.pose
 
     // 前のポーズになってから MIN_POSE_MS たっていなければ前のポーズのまま。残り時間で描き直しを予約する。
@@ -1030,10 +1072,16 @@ export const register: Register = (on, options) => {
           {/* 画像として描く（isInteractive の枠は背景が白く、ダークモードで四角く浮いた） */}
           <Box key="clawd" flexShrink={0}>
             {VARIANTS.map(variant => (
-              <Box key={variant.id} display={variant.id === shownId ? 'flex' : 'none'}>
+              <Box key={variant.id} display={intro === undefined && variant.id === shownId ? 'flex' : 'none'}>
                 <Svg source={variant.source} alt={POSE_ALT[variant.pose]} width={68} height={52} />
               </Box>
             ))}
+            {/* 季節の登場。終わったら外す（絵の幅は焚き火のぶん広い）。描き直しで読み込み直されても続きから動くよう、経過時間を渡す */}
+            {intro === undefined ? null : (
+              <Box key={intro.id}>
+                <Svg source={autumnIntroSvg(intro.id, (now - intro.startedAt) / 1000)} alt="焚き火で焼き芋を焼く Clawd" width={INTRO_WIDTH} height={52} />
+              </Box>
+            )}
             {/* ポインタを乗せたときだけ出るボタン（key を付けると別の範囲になって出なくなるので付けない） */}
             <Box position="absolute" bottom={0} left={0} display="none" hover={{ display: 'flex' }}>
               <Button key="recap" label="📖 あらすじ" onPress={() => void startRecap($, state)} />
